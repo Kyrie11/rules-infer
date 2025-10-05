@@ -1,0 +1,392 @@
+{
+  "version": "1.0.0",
+  "last_updated": "2025-09-15",
+  "description": "A comprehensive rulebook of implicit driving rules for autonomous vehicle behavior modeling.",
+  "rules": {
+    "A.1": {
+      "name": "Longitudinal Control",
+      "description": "Rules governing the vehicle's forward and backward motion.",
+      "children": {
+        "A.1.1": {
+          "name": "Car-Following",
+          "description": "Behavior when following another vehicle.",
+          "children": {
+            "A.1.1.1": {
+              "id": "A.1.1.1",
+              "name": "Steady-state Headway",
+              "description": "The 'comfortable' time gap maintained behind a lead vehicle in steady-state traffic.",
+              "vlm_prompt_hint": "Identify situations of stable car-following and the time headway between vehicles.",
+              "quantification": {
+                "method": "probability_distribution",
+                "distribution_type": "Log-normal",
+                "style_parameters": ["mean", "std_dev"],
+                "governing_parameters": [
+                  {"name": "ego_speed", "unit": "m/s"},
+                  {"name": "traffic_density", "unit": "vehicles/km"}
+                ],
+                "output_metric": {
+                  "name": "Time Headway (THW)",
+                  "unit": "s",
+                  "typical_range": [0.8, 4.0]
+                }
+              }
+            },
+            "A.1.1.2": {
+              "id": "A.1.1.2",
+              "name": "Start-stop Response",
+              "description": "The reaction time to start moving after the lead vehicle moves from a standstill.",
+              "vlm_prompt_hint": "Analyze driver reaction time when traffic starts moving from a stop.",
+              "quantification": {
+                "method": "probability_distribution",
+                "distribution_type": "Gamma",
+                "style_parameters": ["shape_k", "scale_theta"],
+                "governing_parameters": [
+                  {"name": "lead_vehicle_starts_moving", "unit": "event"}
+                ],
+                "output_metric": {
+                  "name": "Reaction Time",
+                  "unit": "s",
+                  "typical_range": [0.5, 3.0]
+                }
+              }
+            },
+            "A.1.1.3": {
+              "id": "A.1.1.3",
+              "name": "Speed Tolerance",
+              "description": "The degree to which drivers exceed the posted speed limit in free-flow conditions.",
+              "vlm_prompt_hint": "Observe the difference between actual driving speed and the legal speed limit.",
+              "quantification": {
+                "method": "probability_distribution",
+                "distribution_type": "Gaussian",
+                "style_parameters": ["mean", "std_dev"],
+                "governing_parameters": [
+                  {"name": "posted_speed_limit", "unit": "km/h"}
+                ],
+                "output_metric": {
+                  "name": "Speeding Delta",
+                  "unit": "km/h",
+                  "typical_range": [-5, 20]
+                }
+              }
+            }
+          }
+        },
+        "A.1.2": {
+          "name": "Braking",
+          "description": "Behavior related to deceleration.",
+          "children": {
+            "A.1.2.1": {
+              "id": "A.1.2.1",
+              "name": "Comfortable Deceleration",
+              "description": "The maximum deceleration rate considered comfortable in non-emergency situations.",
+              "vlm_prompt_hint": "Identify non-emergency braking events and assess their smoothness.",
+              "quantification": {
+                "method": "percentile_of_distribution",
+                "percentile": 85,
+                "style_parameters": ["percentile_value"],
+                "governing_parameters": [
+                  {"name": "is_emergency_braking", "unit": "boolean"}
+                ],
+                "output_metric": {
+                  "name": "Deceleration",
+                  "unit": "m/s^2",
+                  "typical_range": [-4.0, 0.0]
+                }
+              }
+            },
+            "A.1.2.2": {
+              "id": "A.1.2.2",
+              "name": "Yellow Light Dilemma",
+              "description": "The decision to stop or proceed when a traffic light turns yellow.",
+              "vlm_prompt_hint": "Analyze driver decisions at yellow lights, considering their speed and distance to the intersection.",
+              "quantification": {
+                "method": "logistic_regression",
+                "model_formula": "P(Go) = 1 / (1 + exp(-(w1*dist_to_line + w2*speed + b)))",
+                "style_parameters": ["critical_distance_at_50kmh"],
+                "governing_parameters": [
+                  {"name": "distance_to_stop_line", "unit": "m"},
+                  {"name": "current_speed", "unit": "m/s"}
+                ],
+                "output_metric": {
+                  "name": "Go/Stop Decision",
+                  "unit": "binary"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "A.2": {
+      "name": "Lateral Control",
+      "description": "Rules governing the vehicle's side-to-side motion.",
+      "children": {
+        "A.2.1": {
+          "name": "In-lane Behavior",
+          "children": {
+            "A.2.1.1": {
+              "id": "A.2.1.1",
+              "name": "Lane Position Preference",
+              "description": "The preferred lateral position within a lane.",
+              "vlm_prompt_hint": "Observe if drivers tend to stay centered, or prefer to drive on the left or right side of the lane.",
+              "quantification": {
+                "method": "gaussian_mixture_model",
+                "style_parameters": ["component_means", "component_weights"],
+                "governing_parameters": [],
+                "output_metric": {
+                  "name": "Lateral Deviation from Center",
+                  "unit": "m",
+                  "typical_range": [-0.5, 0.5]
+                }
+              }
+            },
+            "A.2.1.2": {
+              "id": "A.2.1.2",
+              "name": "Cornering Trajectory",
+              "description": "The path taken through a curve, e.g., 'cutting the corner' vs. staying centered.",
+              "vlm_prompt_hint": "Analyze the trajectory of vehicles navigating curves.",
+              "quantification": {
+                "method": "trajectory_clustering",
+                "style_parameters": ["cluster_proportions"],
+                "governing_parameters": [
+                  {"name": "road_curvature", "unit": "1/m"}
+                ],
+                "output_metric": {
+                  "name": "Trajectory Cluster ID",
+                  "unit": "category"
+                }
+              }
+            }
+          }
+        },
+        "A.2.2": {
+          "name": "Lane Changing",
+          "children": {
+            "A.2.2.1": {
+              "id": "A.2.2.1",
+              "name": "Accepted Gap",
+              "description": "The minimum gap size in the target lane that a driver is willing to merge into.",
+              "vlm_prompt_hint": "Identify lane change maneuvers and measure the gap with the rear vehicle in the target lane.",
+              "quantification": {
+                "method": "probability_distribution",
+                "distribution_type": "Log-normal",
+                "style_parameters": ["median"],
+                "governing_parameters": [
+                  {"name": "relative_speed_to_rear_car", "unit": "m/s"}
+                ],
+                "output_metric": {
+                  "name": "Accepted Rear Gap (Time)",
+                  "unit": "s",
+                  "typical_range": [0.5, 5.0]
+                }
+              }
+            },
+            "A.2.2.2": {
+              "id": "A.2.2.2",
+              "name": "Lane Change Assertiveness",
+              "description": "The degree of forcefulness in a lane change, often measured by the impact on other vehicles.",
+              "vlm_prompt_hint": "Assess how assertively a driver changes lanes, for instance, if they force other cars to brake.",
+              "quantification": {
+                "method": "game_theory_or_irl",
+                "style_parameters": ["efficiency_vs_safety_ratio_mean", "efficiency_vs_safety_ratio_std_dev"],
+                "governing_parameters": [
+                  {"name": "induced_deceleration_on_others", "unit": "m/s^2"}
+                ],
+                "output_metric": {
+                  "name": "Assertiveness Score",
+                  "unit": "normalized_score"
+                }
+              }
+            },
+            "A.2.2.3": {
+              "id": "A.2.2.3",
+              "name": "Turn Signal Usage Norm",
+              "description": "The convention of using turn signals before a maneuver.",
+              "vlm_prompt_hint": "Check if drivers use turn signals for lane changes or turns, and how early they signal.",
+              "quantification": {
+                "method": "composite",
+                "components": [
+                  {
+                    "name": "usage_probability",
+                    "method": "bernoulli_distribution",
+                    "style_parameters": ["probability_p"]
+                  },
+                  {
+                    "name": "timing_in_advance",
+                    "method": "probability_distribution",
+                    "distribution_type": "Exponential",
+                    "style_parameters": ["mean"]
+                  }
+                ],
+                "governing_parameters": [
+                  {"name": "maneuver_type", "unit": "category"}
+                ],
+                "output_metric": {
+                  "name": "Signal Usage",
+                  "unit": "boolean_and_time"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "A.3": {
+      "name": "Intersection Interaction",
+      "description": "Rules governing behavior at intersections.",
+      "children": {
+        "A.3.1": {
+          "id": "A.3.1",
+          "name": "Unprotected Left Turn",
+          "description": "The strategy for turning left across oncoming traffic without a dedicated signal.",
+          "vlm_prompt_hint": "Focus on unprotected left turns and the interaction with oncoming traffic.",
+          "quantification": {
+            "method": "game_theory_or_irl",
+            "style_parameters": ["efficiency_vs_safety_ratio_mean", "efficiency_vs_safety_ratio_std_dev"],
+            "governing_parameters": [
+              {"name": "oncoming_traffic_gap", "unit": "s"},
+              {"name": "oncoming_traffic_speed", "unit": "m/s"}
+            ],
+            "output_metric": {
+              "name": "Accepted Oncoming Gap (TTC)",
+              "unit": "s"
+            }
+          }
+        },
+        "A.3.2": {
+          "id": "A.3.2",
+          "name": "Roundabout/Unsignalized Priority",
+          "description": "The de-facto priority rules at unsignalized intersections or roundabouts, which may differ from legal rules.",
+          "vlm_prompt_hint": "Observe who yields to whom at roundabouts or intersections without traffic lights.",
+          "quantification": {
+            "method": "game_theory_or_irl",
+            "style_parameters": ["aggressiveness_parameter_mean"],
+            "governing_parameters": [
+              {"name": "time_to_intersection_for_all_agents", "unit": "s"}
+            ],
+            "output_metric": {
+              "name": "Yield/Take Decision",
+              "unit": "binary"
+            }
+          }
+        },
+        "A.3.3": {
+          "id": "A.3.3",
+          "name": "Pedestrian Priority Observance",
+          "description": "The degree to which drivers yield to pedestrians at crosswalks.",
+          "vlm_prompt_hint": "Watch for interactions between vehicles and pedestrians at crosswalks.",
+          "quantification": {
+            "method": "bernoulli_distribution",
+            "style_parameters": ["yield_probability_p"],
+            "governing_parameters": [
+              {"name": "pedestrian_intent_to_cross", "unit": "boolean"}
+            ],
+            "output_metric": {
+              "name": "Yield Decision",
+              "unit": "binary"
+            }
+          }
+        }
+      }
+    },
+    "B": {
+      "name": "Interaction-based Classification",
+      "description": "General rules governing the social interaction between agents, which complement the specific task-based rules.",
+      "children": {
+        "B.1": {
+          "name": "Vehicle-to-Vehicle Interaction (V2V)",
+          "description": "General principles of interacting with other motor vehicles.",
+          "children": {
+            "B.1.1": {
+              "id": "B.1.1",
+              "name": "Cooperative vs. Competitive Stance",
+              "description": "The general tendency of a driver to be cooperative (e.g., yielding space, facilitating merges) versus competitive (e.g., blocking, racing for position). This is a high-level trait that influences many specific tasks like A.2.2.2 and A.3.2.",
+              "vlm_prompt_hint": "Assess the overall social behavior: Is the driver helping others or only maximizing their own progress?",
+              "quantification": {
+                "method": "ordinal_classification",
+                "model_type": "Ordinal Logistic Regression",
+                "style_parameters": ["cooperation_score_mean", "cooperation_score_std_dev"],
+                "governing_parameters": [
+                  {"name": "unsolicited_yielding_events", "unit": "count"},
+                  {"name": "blocking_maneuvers", "unit": "count"},
+                  {"name": "response_to_merge_request", "unit": "category"}
+                ],
+                "output_metric": {
+                  "name": "Cooperation Level",
+                  "unit": "ordered_category (e.g., 1-5 from competitive to cooperative)"
+                }
+              }
+            }
+          }
+        },
+        "B.2": {
+          "name": "Vehicle-to-VRU Interaction (V2VRU)",
+          "description": "General principles of interacting with Vulnerable Road Users (pedestrians, cyclists, etc.).",
+          "children": {
+            "B.2.1": {
+              "id": "B.2.1",
+              "name": "General VRU Caution Margin",
+              "description": "The proactive safety margin (time and space) drivers maintain around VRUs, even when not legally required to yield. This complements the specific rule A.3.3 (Pedestrian Priority Observance).",
+              "vlm_prompt_hint": "Measure the buffer zone drivers keep from cyclists or pedestrians on the roadside.",
+              "quantification": {
+                "method": "probability_distribution",
+                "distribution_type": "Log-normal",
+                "style_parameters": ["mean_lateral_distance", "mean_time_to_collision"],
+                "governing_parameters": [
+                  {"name": "vru_type", "unit": "category (pedestrian, cyclist)"},
+                  {"name": "vru_proximity", "unit": "m"}
+                ],
+                "output_metric": {
+                  "name": "Safety Margin",
+                  "unit": "m_or_s"
+                }
+              }
+            }
+          }
+        },
+        "B.3": {
+          "name": "Communication & Signaling (Visual Only)",
+          "description": "Rules governing non-verbal, visual communication with other agents. Excludes auditory signals. Note: Turn signal usage is detailed under A.2.2.3 but is fundamentally a form of communication.",
+          "children": {
+            "B.3.1": {
+              "id": "B.3.1",
+              "name": "Headlight Flash Communication",
+              "description": "The use of headlight flashes to signal yielding, warn of danger, or indicate presence. The meaning is highly context-dependent.",
+              "vlm_prompt_hint": "Identify headlight flashes and interpret their meaning based on the situation (e.g., yielding at a four-way stop).",
+              "quantification": {
+                "method": "classification_and_frequency",
+                "style_parameters": ["usage_rate_per_hour", "yield_signal_probability"],
+                "governing_parameters": [
+                  {"name": "context", "unit": "category (intersection, highway, night)"},
+                  {"name": "flash_pattern", "unit": "category (single, double)"}
+                ],
+                "output_metric": {
+                  "name": "Flash Intent",
+                  "unit": "category (yield, warn, acknowledge)"
+                }
+              }
+            },
+            "B.3.2": {
+              "id": "B.3.2",
+              "name": "Brake Light Signaling",
+              "description": "The use of brake lights for more than just deceleration, such as gentle 'taps' to warn a tailgater or signal caution.",
+              "vlm_prompt_hint": "Detect brake light activations that are not associated with significant deceleration and infer their communicative intent.",
+              "quantification": {
+                "method": "event_detection_and_classification",
+                "style_parameters": ["warning_tap_frequency"],
+                "governing_parameters": [
+                  {"name": "deceleration_profile", "unit": "m/s^2"},
+                  {"name": "rear_vehicle_headway", "unit": "s"}
+                ],
+                "output_metric": {
+                  "name": "Brake Tap Event",
+                  "unit": "boolean"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

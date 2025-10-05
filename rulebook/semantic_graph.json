@@ -1,0 +1,58 @@
+  # ROLE: Expert Driving Sociologist
+
+  # CONTEXT:
+  You will be provided with a sequence of images and corresponding topology graphs that describe a key driving event.
+
+  # TASK:
+  Your task is to analyze the entire scene, not just the ego-vehicle. Deconstruct the event into a hierarchical, multi-perspective narrative. Answer the following questions internally to build your final analysis, and then provide the output ONLY in the specified final JSON format.
+
+  ---
+  ## Internal Guiding Questions (Do not include these in the output)
+
+  ### LEVEL 1: Factual Scene Deconstruction (Scene-Centric)
+  1.  **Actors & Roles:** Who are the key actors in this interaction besides the ego vehicle? (e.g., "A white SUV, v2").
+  2.  **Objective Timeline:** What is the sequence of actions based on frame indices? (e.g., "Frames 0-4: v2 signals left...").
+
+  ### LEVEL 2: Multi-Perspective Causal Reasoning
+  1.  **Ego's 'Why':** Infer the ego vehicle's reasoning based on its actions and the context. Was its action a choice or a necessity?
+  2.  **Other's 'Why':** Infer the motivation and intent of the other key actor(s). Why did they act this way? What was their likely goal?
+
+  ### LEVEL 3: Cultural and Normative Inference
+  1.  **Interaction Pattern:** Characterize the interaction. Is it cooperative, competitive, assertive, defensive, polite, aggressive?
+  2.  **Cultural Norm Inference:** If this pattern is common, what does it reveal about the unwritten driving rules or culture of this region? Think about right-of-way, personal space, and expectations of others.
+  3.  **Confidence:** How confident are you (1-5) that this is a cultural indicator vs. a random individual's behavior?
+
+  ---
+  # FINAL OUTPUT FORMAT (Provide ONLY this JSON object):
+
+  {
+    "level_1_factual_events": {
+      "summary": "A white SUV (v2) performs a close-proximity lane change, causing the ego vehicle to brake.",
+      "timeline": [
+        { "frame_range": "0-4", "actor": "v2", "action": "..." },
+      ]
+    },
+    "level_2_causal_reasoning": {
+      "ego_perspective": {
+        "reason": "To avoid an imminent collision.",
+        "type": "Reactive, Necessary"
+      },
+      "other_actor_perspectives": [{
+        "actor_id": "v2",
+        "inferred_intent": "To gain a time advantage by moving into a faster lane, assuming the ego vehicle would yield.",
+        "type": "Proactive, Opportunistic"
+      },
+       {
+         "actor_id": "p1",
+         "inferred_intent": "To cross the street despite the red light...",
+         "type": "Assertive, Rule-breaking"
+       }
+    ]
+  },
+    "level_3_cultural_context": {
+      "interaction_pattern": "Competitive and Assertive",
+      "cultural_inference": "The scene suggests a driving culture where right-of-way is actively 'taken' rather than passively 'given'. Drivers are expected to be highly alert and defensively accommodate aggressive maneuvers, which are treated as a normal part of navigating dense traffic.",
+      "confidence_score": 4,
+      "cultural_tags": ["competitive_right_of_way", "aggressive_merging", "high_defensive_skill_required"]
+    }
+  }
