@@ -68,6 +68,7 @@ class NuscenesDataset(Dataset):
 
             # 3. 查找控制该车道的交通灯
             lane_record = current_map.get('lane', current_lane_token)
+            print(lane_record.keys())
             if lane_record['traffic_control_tokens']:
                 # 找到了第一个被交通灯控制的车道，这就是我们关心的灯
                 relevant_tl_token = lane_record['traffic_control_tokens'][0]
