@@ -5,7 +5,7 @@ import torch
 class Config:
     # --- Dataset Parameters ---
     DATAROOT = '/home/senzeyu2/dataset/nuscenes/'  # <--- 修改为你的路径
-    VERSION = 'v1.0'
+    VERSION = 'v1.0-trainval'
 
     # --- Trajectory Parameters ---
     OBS_LEN = 8
