@@ -134,9 +134,13 @@ class NuscenesDataset(Dataset):
 
                     # 1. 位置信息
                     pos = np.array(ann['translation'][:2], dtype=np.float32)
+                    patch_box = (pos[0] - 0.5, pos[1] - 0.5, pos[0] + 0.5, pos[1] + 0.5)
+                    # 查询这个patch内是否有 'drivable_area' 的记录
+                    records_in_patch = current_map.get_records_in_patch(patch_box, layer_names=['drivable_area'])
 
-                    # 2. 地图信息 (可行驶区域)
-                    is_on_drivable = float(current_map.isin_layer(pos[0], pos[1], 'drivable_area'))
+                    # 如果返回的字典中 'drivable_area' 列表不为空，则说明agent在可行驶区域内
+                    is_on_drivable = float(len(records_in_patch['drivable_area']) > 0)
+
 
                     # **[修改点 3]** 调用新的函数获取agent专属的交通灯状态
                     tl_status_one_hot = self._get_agent_specific_traffic_light_status(ann, sample, current_map)
