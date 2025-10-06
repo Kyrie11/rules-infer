@@ -136,7 +136,7 @@ class NuscenesDataset(Dataset):
                     pos = np.array(ann['translation'][:2], dtype=np.float32)
 
                     # 2. 地图信息 (可行驶区域)
-                    is_on_drivable = float(current_map.get_is_on_layer(pos[0], pos[1], 'drivable_area'))
+                    is_on_drivable = float(current_map.isin_layer(pos[0], pos[1], 'drivable_area'))
 
                     # **[修改点 3]** 调用新的函数获取agent专属的交通灯状态
                     tl_status_one_hot = self._get_agent_specific_traffic_light_status(ann, sample, current_map)
