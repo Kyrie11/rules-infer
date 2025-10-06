@@ -4,7 +4,7 @@ from nuscenes.nuscenes import NuScenes
 from nuscenes.map_expansion.map_api import NuScenesMap
 from tqdm import tqdm
 import numpy as np
-from tools import config
+
 
 class NuscenesDataset(Dataset):
     def __init__(self, nusc, scenes, config):

@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.splits import create_splits_scenes
 from config import Config
-from ..dataset.nuscenes import NuscenesDataset
+from rules_infer.dataset.nuscenes import NuscenesDataset
 from motion_lstm import Seq2Seq
 
 
