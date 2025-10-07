@@ -5,7 +5,7 @@ import torch
 class Config:
     # --- Dataset Parameters ---
     DATAROOT = '/data0/senzeyu2/dataset/'  # <--- 修改为你的路径
-    VERSION = 'v1.0-trainval'
+    VERSION = 'v1.0-mini'
 
     # --- Trajectory Parameters ---
     OBS_LEN = 8
