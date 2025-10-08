@@ -1,3 +1,10 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, random_split
+import numpy as np
+import random
+
 class Encoder(nn.Module):
     def __init__(self, input_dim, hidden_dim, n_layers):
         super().__init__()
