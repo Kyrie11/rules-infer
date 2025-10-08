@@ -1,65 +1,61 @@
-# model.py
-import torch
-import torch.nn as nn
-
 class Encoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, num_layers):
-        super(Encoder, self).__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True
-        )
+    def __init__(self, input_dim, hidden_dim, n_layers):
+        super().__init__()
+        self.lstm = nn.LSTM(input_dim, hidden_dim, n_layers, batch_first=True)
 
-    def forward(self, x):
-        _, (hidden, cell) = self.lstm(x)
+    def forward(self, src):
+        # src shape: [batch_size, hist_len, input_dim]
+        outputs, (hidden, cell) = self.lstm(src)
+        # hidden shape: [n_layers, batch_size, hidden_dim]
+        # cell shape: [n_layers, batch_size, hidden_dim]
         return hidden, cell
 
 
 class Decoder(nn.Module):
-    def __init__(self, output_dim, hidden_dim, num_layers):
-        super(Decoder, self).__init__()
-        # Decoder的输入维度是2 (x, y)，而不是完整的特征维度
-        self.lstm = nn.LSTM(
-            input_size=output_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True
-        )
-        self.fc = nn.Linear(hidden_dim, output_dim)
+    def __init__(self, output_dim, hidden_dim, n_layers):
+        super().__init__()
+        self.output_dim = output_dim
+        self.lstm = nn.LSTM(output_dim, hidden_dim, n_layers, batch_first=True)
+        self.fc_out = nn.Linear(hidden_dim, output_dim)
 
-    def forward(self, x, hidden, cell):
-        output, (hidden, cell) = self.lstm(x, (hidden, cell))
-        prediction = self.fc(output)
+    def forward(self, input, hidden, cell):
+        # input shape: [batch_size, 1, output_dim]
+        # hidden, cell from encoder
+        output, (hidden, cell) = self.lstm(input, (hidden, cell))
+        # output shape: [batch_size, 1, hidden_dim]
+        prediction = self.fc_out(output)
+        # prediction shape: [batch_size, 1, output_dim]
         return prediction, hidden, cell
 
 
 class Seq2Seq(nn.Module):
-    def __init__(self, config):
-        super(Seq2Seq, self).__init__()
-        self.encoder = Encoder(config.INPUT_DIM, config.HIDDEN_DIM, config.NUM_LAYERS)
-        self.decoder = Decoder(config.OUTPUT_DIM, config.HIDDEN_DIM, config.NUM_LAYERS)
-        self.pred_len = config.PRED_LEN
-        self.device = config.DEVICE
+    def __init__(self, encoder, decoder, device):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.device = device
 
-    def forward(self, src, target):
-        # src shape: (batch_size, obs_len, input_dim)
-        # target shape: (batch_size, pred_len, output_dim)
-
+    def forward(self, src, trg, teacher_forcing_ratio=0.5):
+        # src: [batch_size, hist_len, input_dim]
+        # trg: [batch_size, future_len, output_dim]
         batch_size = src.shape[0]
-        outputs = torch.zeros(batch_size, self.pred_len, self.decoder.fc.out_features).to(self.device)
+        trg_len = trg.shape[1]
+        trg_vocab_size = self.decoder.output_dim
+
+        outputs = torch.zeros(batch_size, trg_len, trg_vocab_size).to(self.device)
 
         hidden, cell = self.encoder(src)
 
-        # Decoder的第一个输入是观察序列的最后一个点的(x, y)坐标
-        # 在我们的数据预处理中，这个点是相对坐标 (0,0)
-        decoder_input = src[:, -1, :2].unsqueeze(1)  # 只取前两位(x, y)
+        # 使用历史轨迹的最后一个点作为解码器的第一个输入
+        input = src[:, -1, :].unsqueeze(1)
 
-        # Teacher Forcing: 使用真实的target作为下一步的输入
-        for t in range(self.pred_len):
-            decoder_output, hidden, cell = self.decoder(decoder_input, hidden, cell)
-            outputs[:, t, :] = decoder_output.squeeze(1)
-            decoder_input = target[:, t, :].unsqueeze(1)
+        for t in range(trg_len):
+            output, hidden, cell = self.decoder(input, hidden, cell)
+            outputs[:, t, :] = output.squeeze(1)
+
+            # 决定是否使用 teacher forcing
+            teacher_force = random.random() < teacher_forcing_ratio
+            # 如果是 teacher forcing，下一个输入是真实值；否则是当前预测值
+            input = trg[:, t, :].unsqueeze(1) if teacher_force else output
 
         return outputs
