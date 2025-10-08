@@ -8,6 +8,7 @@ import random
 from tqdm import tqdm
 import numpy as np
 from rules_infer.dataset.nuscenes import NuScenesTrajectoryDataset
+from rules_infer.tools.motion_lstm import *
 # ----------------------------------
 # 1. 配置参数 (Configuration)
 # ----------------------------------
