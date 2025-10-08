@@ -30,7 +30,7 @@ class NuScenesTrajectoryDataset(Dataset):
 
     def _load_sequences(self):
         """
-        加载并处理所有场景中的所有 agent 轨迹
+        加载并处理所有场景中的所有 agent 轨迹 (修正版)
         """
         print("Loading and processing sequences from NuScenes...")
         all_sequences = []
@@ -38,10 +38,15 @@ class NuScenesTrajectoryDataset(Dataset):
         # 遍历每个场景
         for scene in tqdm(self.nusc.scene, desc="Processing Scenes"):
             first_sample_token = scene['first_sample_token']
-
-            # 获取该场景中所有 agent 的 instance token
             sample = self.nusc.get('sample', first_sample_token)
-            instance_tokens = {ann['instance_token'] for ann in sample['anns']}
+
+            # --- FIX START ---
+            # 正确的做法：先获取 annotation token, 再通过 nusc.get 获取完整的 annotation 字典
+            instance_tokens = {
+                self.nusc.get('sample_annotation', ann_token)['instance_token']
+                for ann_token in sample['anns']
+            }
+            # --- FIX END ---
 
             # 遍历每个 agent
             for instance_token in instance_tokens:
