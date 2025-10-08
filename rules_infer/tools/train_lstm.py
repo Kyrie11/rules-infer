@@ -2,12 +2,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, random_split
-
+from nuscenes.nuscenes import NuScenes
 import os
 import random
 from tqdm import tqdm
 import numpy as np
-
+from rules_infer.dataset.nuscenes import NuScenesTrajectoryDataset
 # ----------------------------------
 # 1. 配置参数 (Configuration)
 # ----------------------------------
