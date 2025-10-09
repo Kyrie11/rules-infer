@@ -14,26 +14,26 @@ from rules_infer.dataset.nuscenes import NuScenesTrajectoryDataset
 from rules_infer.tools.motion_lstm import Encoder, Decoder, Seq2Seq
 
 CONFIG = {
-    # 数据集路径，请修改为你自己的路径
+    # --- 数据和模型路径 ---
     'dataroot': '/data0/senzeyu2/dataset/',  # <--- !!! 修改这里 !!!
-    'version': 'v1.0-trainval',  # 先用 'v1.0-mini' 测试, 跑通后再换成 'v1.0-trainval'
+    'version': 'v1.0-trainval',  # 建议先用 'v1.0-mini' 测试，然后换成 'v1.0-trainval'
+    'model_path': '../../nuscenes-lstm-model.pt',  # 你保存的模型权重文件
+    'output_dir': 'eval_results',  # 保存可视化结果的文件夹
 
-    # 轨迹参数 (以 2Hz 的采样率计算)
-    'history_len': 8,  # 使用 4s 的历史轨迹 (8 * 0.5s)
-    'future_len': 12,  # 预测 6s 的未来轨迹 (12 * 0.5s)
+    # --- 模型和数据参数 (必须与训练时一致) ---
+    'history_len': 8,
+    'future_len': 12,
+    'input_dim': 4,  # (x, y, is_near_tl, dist_to_tl) - 如果训练时没用地图，这里是 2
+    'hidden_dim': 128,
+    'output_dim': 2,
+    'n_layers': 2,
 
-    # 模型参数
-    'input_dim': 2,  # 输入维度: (x, y)
-    'hidden_dim': 64,  # LSTM 隐藏层维度
-    'output_dim': 2,  # 输出维度: (x, y)
-    'n_layers': 2,  # LSTM 层数
-
-    # 训练参数
+    # --- 评估参数 ---
     'batch_size': 64,
-    'n_epochs': 50,
-    'learning_rate': 0.001,
-    'teacher_forcing_ratio': 0.5,  # 训练时使用真实值作为下一步输入的概率
-    'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+
+    # --- 地图参数 (如果训练时使用了) ---
+    'traffic_light_distance_threshold': 30.0,
 }
 
 
