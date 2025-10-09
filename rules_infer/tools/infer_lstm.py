@@ -17,7 +17,7 @@ CONFIG = {
     # --- 数据和模型路径 ---
     'dataroot': '/data0/senzeyu2/dataset/',  # <--- !!! 修改这里 !!!
     'version': 'v1.0-trainval',  # 建议先用 'v1.0-mini' 测试，然后换成 'v1.0-trainval'
-    'model_path': '../../nuscenes-lstm-model.pt',  # 你保存的模型权重文件
+    'model_path': 'nuscenes-lstm-model.pt',  # 你保存的模型权重文件
     'output_dir': 'eval_results',  # 保存可视化结果的文件夹
 
     # --- 模型和数据参数 (必须与训练时一致) ---
