@@ -1,0 +1,20 @@
+Input: X, c_i, v_i,B, positive integer l.
+1: Let s^A := 0 denote the current best solution.
+2: for each subset L \subseteq X with |L| ≤ l − 1 do
+3:     if \sum_{j\in L} c_j \leq B then
+4:          if \sum_{j\in L} v_j \geq s^A then
+5:              s^A := \sum_{j\in L} v_j
+6:          end if
+7:     end if
+8: end for
+9: for each subset L \subseteq X with |L| = l do
+10:     if \sum_{j∈L} c_j \leq B then
+11:         Apply the 1/2-Greedy algorithm to the knapsack instance with item set
+                {j | v_j ≤ min{v_i | i \in L}} \ L
+            and budget B - \sum_{j\in L} c_j , returning solution value \bar{s}.
+12:         if \sum_{j\in L} v_j + \bar{s} > s^A then
+13:             s^A := \sum_{j\in L} v_j + \bar{s}
+14:         end if
+15:     end if
+16: end for
+17: return arg max s^A
