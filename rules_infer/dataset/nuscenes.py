@@ -3,9 +3,6 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from nuscenes.map_expansion.map_api import NuScenesMap
 from tqdm import tqdm
 import numpy as np
-
-# 确保 nuscenes-devkit 已经安装
-# pip install nuscenes-devkit
 from nuscenes.nuscenes import NuScenes
 
 
@@ -15,11 +12,56 @@ from nuscenes.nuscenes import NuScenes
 # 2. 数据集加载 (Dataset Loading)
 # ----------------------------------
 class NuScenesTrajectoryDataset(Dataset): # ... (代码与之前完全相同，为简洁省略)
+    # 在 NuScenesTrajectoryDataset 类中
     def __init__(self, nusc, config):
         self.nusc = nusc
         self.config = config
-        self.maps = {m['filename']: NuScenesMap(dataroot=config['dataroot'], map_name=m['filename']) for m in nusc.map}
+        print("Loading NuScenes maps using location names...")
+
+        ### MODIFICATION START ###
+        # 创建一个从 log_token 到 location 的映射
+        log_token_to_location = {log['token']: log['location'] for log in self.nusc.log}
+
+        self.maps = {}
+        # 遍历 nuscenes 的地图记录
+        for map_record in self.nusc.map:
+            # 地图记录中包含了它所关联的所有 log_tokens
+            log_tokens = map_record['log_tokens']
+
+            # 假设同一张地图文件（如 boston-seaport）的所有 log 都共享同一个 location
+            # 我们取第一个 log_token 来查找 location
+            if not log_tokens:
+                continue
+
+            first_log_token = log_tokens[0]
+            location = log_token_to_location.get(first_log_token)
+
+            if location is None:
+                print(f"Warning: Could not find location for map record: {map_record['token']}")
+                continue
+
+            # 检查 location (即 map_name) 是否已经加载
+            if location not in self.maps:
+                # 使用 location 作为 map_name 来加载地图
+                # NuScenesMap 内部会自动处理文件路径
+                try:
+                    print(f"  - Loading map for location: {location}")
+                    self.maps[location] = NuScenesMap(
+                        dataroot=self.config['dataroot'],
+                        map_name=location
+                    )
+                except Exception as e:
+                    print(f"  - Failed to load map {location}: {e}")
+
+        ### MODIFICATION END ###
+
+        if not self.maps:
+            raise RuntimeError("Failed to load any maps. Please check your NuScenes installation and dataroot.")
+
+        print("Maps loaded successfully.")
+
         self.sequences, self.full_trajectories = self._load_data()
+
     def _get_traffic_light_features(self, agent_pos, map_api):
         is_near_tl, dist_to_tl = 0.0, 1.0; tl_records = map_api.get_records_in_radius(agent_pos[0], agent_pos[1], 50, ['traffic_light']);
         if not tl_records: return np.array([is_near_tl, dist_to_tl], dtype=np.float32)
