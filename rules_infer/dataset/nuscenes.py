@@ -18,76 +18,50 @@ from nuscenes.nuscenes import NuScenes
 # ----------------------------------
 # 2. 数据集加载 (Dataset Loading)
 # ----------------------------------
-class NuScenesTrajectoryDataset(Dataset):
-    """
-    NuScenes anget 轨迹数据集
-    """
-
+class NuScenesTrajectoryDataset(Dataset): # ... (代码与之前完全相同，为简洁省略)
     def __init__(self, nusc, config):
         self.nusc = nusc
         self.config = config
-        self.sequences = self._load_sequences()
-
-    def _load_sequences(self):
-        """
-        加载并处理所有场景中的所有 agent 轨迹 (修正版)
-        """
-        print("Loading and processing sequences from NuScenes...")
-        all_sequences = []
-
-        # 遍历每个场景
+        self.maps = {m['filename']: NuScenesMap(dataroot=config['dataroot'], map_name=m['filename']) for m in nusc.map}
+        self.sequences, self.full_trajectories = self._load_data()
+    def _get_traffic_light_features(self, agent_pos, map_api):
+        is_near_tl, dist_to_tl = 0.0, 1.0; tl_records = map_api.get_records_in_radius(agent_pos[0], agent_pos[1], 50, ['traffic_light']);
+        if not tl_records: return np.array([is_near_tl, dist_to_tl], dtype=np.float32)
+        min_dist = float('inf')
+        for tl_id in tl_records:
+            tl_polygon = map_api.get('traffic_light', tl_id);
+            if not tl_polygon or 'polygon_token' not in tl_polygon: continue
+            polygon = map_api.extract_polygon(tl_polygon['polygon_token']); center_point = np.mean(polygon.exterior.xy, axis=1); dist = np.linalg.norm(agent_pos - center_point);
+            if dist < min_dist: min_dist = dist
+        if min_dist < self.config['traffic_light_distance_threshold']: is_near_tl = 1.0
+        dist_to_tl = min(min_dist, self.config['traffic_light_distance_threshold']) / self.config['traffic_light_distance_threshold']
+        return np.array([is_near_tl, dist_to_tl], dtype=np.float32)
+    def _load_data(self):
+        all_sequences, full_trajectories = [], {}
         for scene in tqdm(self.nusc.scene, desc="Processing Scenes"):
-            first_sample_token = scene['first_sample_token']
-            sample = self.nusc.get('sample', first_sample_token)
-
-            # --- FIX START ---
-            # 正确的做法：先获取 annotation token, 再通过 nusc.get 获取完整的 annotation 字典
-            instance_tokens = {
-                self.nusc.get('sample_annotation', ann_token)['instance_token']
-                for ann_token in sample['anns']
-            }
-            # --- FIX END ---
-
-            # 遍历每个 agent
+            log = self.nusc.get('log', scene['log_token']); map_api = self.maps[log['location']]; first_sample_token = scene['first_sample_token']; sample = self.nusc.get('sample', first_sample_token)
+            instance_tokens = {self.nusc.get('sample_annotation', ann_token)['instance_token'] for ann_token in sample['anns']}
             for instance_token in instance_tokens:
-                trajectory = []
-                current_sample_token = first_sample_token
-
-                # 追踪这个 agent 在整个场景中的轨迹
+                trajectory = []; current_sample_token = first_sample_token
                 while current_sample_token:
-                    sample_record = self.nusc.get('sample', current_sample_token)
-
-                    # 查找当前 sample 中对应的 annotation
-                    ann_tokens = sample_record['anns']
-                    instance_ann = None
-                    for ann_token in ann_tokens:
+                    sample_record = self.nusc.get('sample', current_sample_token); instance_ann = None
+                    for ann_token in sample_record['anns']:
                         ann = self.nusc.get('sample_annotation', ann_token)
-                        if ann['instance_token'] == instance_token:
-                            instance_ann = ann
-                            break
-
+                        if ann['instance_token'] == instance_token: instance_ann = ann; break
                     if instance_ann:
-                        # 只关心 x, y 坐标
-                        translation = instance_ann['translation']
-                        trajectory.append([translation[0], translation[1]])
-
-                    # 移动到下一个 sample
+                        pos = instance_ann['translation']; agent_pos_2d = np.array([pos[0], pos[1]]); tl_features = self._get_traffic_light_features(agent_pos_2d, map_api); feature_vector = np.concatenate([agent_pos_2d, tl_features]); trajectory.append(feature_vector)
                     current_sample_token = sample_record['next']
-
-                # 如果轨迹足够长，则使用滑动窗口创建样本
+                if len(trajectory) > 0: full_trajectories[(scene['token'], instance_token)] = np.array(trajectory, dtype=np.float32)
                 total_len = self.config['history_len'] + self.config['future_len']
                 if len(trajectory) >= total_len:
                     for i in range(len(trajectory) - total_len + 1):
-                        hist = trajectory[i: i + self.config['history_len']]
-                        future = trajectory[i + self.config['history_len']: i + total_len]
-                        all_sequences.append((np.array(hist, dtype=np.float32), np.array(future, dtype=np.float32)))
-
-        print(f"Finished processing. Found {len(all_sequences)} trajectory samples.")
-        return all_sequences
-
-    def __len__(self):
-        return len(self.sequences)
-
+                        hist = np.array(trajectory[i : i + self.config['history_len']], dtype=np.float32)
+                        future = np.array([t[:2] for t in trajectory[i + self.config['history_len'] : i + total_len]], dtype=np.float32)
+                        metadata = {"scene_token": scene['token'], "instance_token": instance_token, "start_index_in_full_traj": i, "full_traj_len": len(trajectory)}
+                        all_sequences.append((hist, future, metadata))
+        print(f"Finished processing. Found {len(all_sequences)} samples.")
+        return all_sequences, full_trajectories
+    def __len__(self): return len(self.sequences)
     def __getitem__(self, idx):
-        history, future = self.sequences[idx]
-        return torch.from_numpy(history), torch.from_numpy(future)
+        history, future, metadata = self.sequences[idx]
+        return torch.from_numpy(history), torch.from_numpy(future), metadata
