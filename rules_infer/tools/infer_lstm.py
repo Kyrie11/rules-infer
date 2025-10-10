@@ -1,14 +1,12 @@
 import torch
 from torch.utils.data import DataLoader, random_split
-import numpy as np
-import os
+import json
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-import torch.nn as nn
-import random
 # 确保 nuscenes-devkit 和其他库已安装
 from nuscenes.nuscenes import NuScenes
 from nuscenes.map_expansion.map_api import NuScenesMap
+from collections import defaultdict
 
 from rules_infer.dataset.nuscenes import NuScenesTrajectoryDataset
 from rules_infer.tools.motion_lstm import Encoder, Decoder, Seq2Seq
@@ -78,81 +76,126 @@ def visualize_prediction(history, gt_future, pred_future, save_path):
     plt.savefig(save_path)
     plt.close()
 
+def collate_fn_with_meta(batch):
+    histories = torch.stack([item[0] for item in batch]); futures = torch.stack([item[1] for item in batch]); metadata = [item[2] for item in batch]
+    return histories, futures, metadata
 
 # ----------------------------------
 # 5. 主评估函数
 # ----------------------------------
 def main():
     print(f"Using device: {CONFIG['device']}")
-
-    # 创建输出文件夹
-    os.makedirs(CONFIG['output_dir'], exist_ok=True)
-
-    # 1. 加载 NuScenes 数据
     nusc = NuScenes(version=CONFIG['version'], dataroot=CONFIG['dataroot'], verbose=False)
 
-    # 2. 创建数据集
+    # 我们需要在整个数据集上挖掘，而不仅仅是验证集
+    # 如果数据集很大，可以考虑只用 val_dataset
     full_dataset = NuScenesTrajectoryDataset(nusc, CONFIG)
 
-    # 3. 划分训练集和验证集 (使用固定随机种子确保与训练时划分一致)
-    torch.manual_seed(42)
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    _, val_dataset = random_split(full_dataset, [train_size, val_size])
+    # 使用整个数据集进行挖掘
+    data_loader = DataLoader(full_dataset, batch_size=CONFIG['batch_size'], shuffle=False, num_workers=4,
+                             collate_fn=collate_fn_with_meta)
 
-    print(f"Using validation set of size: {len(val_dataset)}")
-
-    # 4. 创建 DataLoader
-    val_loader = DataLoader(val_dataset, batch_size=CONFIG['batch_size'], shuffle=False, num_workers=4)
-
-    # 5. 初始化模型并加载权重
+    # 加载模型
     encoder = Encoder(CONFIG['input_dim'], CONFIG['hidden_dim'], CONFIG['n_layers'])
     decoder = Decoder(CONFIG['output_dim'], CONFIG['hidden_dim'], CONFIG['n_layers'])
     model = Seq2Seq(encoder, decoder, CONFIG['device']).to(CONFIG['device'])
-
-    try:
-        model.load_state_dict(torch.load(CONFIG['model_path'], map_location=CONFIG['device']))
-        print(f"Model weights loaded successfully from {CONFIG['model_path']}")
-    except FileNotFoundError:
-        print(f"Error: Model file not found at {CONFIG['model_path']}")
-        return
-    except Exception as e:
-        print(f"Error loading model weights: {e}")
-        return
-
-    # 6. 开始评估
+    model.load_state_dict(torch.load(CONFIG['model_path'], map_location=CONFIG['device']))
+    print(f"Model loaded from {CONFIG['model_path']}")
     model.eval()
-    total_ade = []
-    total_fde = []
+
+    ### NEW/MODIFIED ###
+    # 用于存储每个场景中每个 agent 的失败帧
+    # 结构: {scene_token: {instance_token: [(frame_index, fde_error), ...]}}
+    failure_points = defaultdict(lambda: defaultdict(list))
 
     with torch.no_grad():
-        for batch_idx, (history, future) in enumerate(tqdm(val_loader, desc="Evaluating")):
-            history = history.to(CONFIG['device'])
-            future = future.to(CONFIG['device'])
-
-            # 预测时 teacher_forcing_ratio 必须为 0
+        for history, future, metadata in tqdm(data_loader, desc="Finding Failure Points"):
+            history, future = history.to(CONFIG['device']), future.to(CONFIG['device'])
             output = model(history, future, 0)
 
-            # 计算指标
-            batch_ade = calculate_ade(output, future)
-            batch_fde = calculate_fde(output, future)
-            total_ade.append(batch_ade.item())
-            total_fde.append(batch_fde.item())
+            fde_per_sample = torch.norm(output[:, -1, :] - future[:, -1, :], p=2, dim=1)
 
-            # 可视化该 batch 的第一个样本 (每隔几个 batch 可视化一次以防图片过多)
-            if batch_idx % 20 == 0:
-                save_path = os.path.join(CONFIG['output_dir'], f'prediction_batch{batch_idx}_sample0.png')
-                # history 的输入维度是4, 但绘图只需要前两维 (x,y)
-                visualize_prediction(history[0, :, :2], future[0], output[0], save_path)
+            for i in range(len(history)):
+                if fde_per_sample[i].item() > CONFIG['critical_event_threshold_fde']:
+                    meta = metadata[i]
+                    scene_token = meta["scene_token"]
+                    instance_token = meta["instance_token"]
+                    # 记录的是历史轨迹的起始帧
+                    start_frame = meta["start_index_in_full_traj"]
+                    fde_error = fde_per_sample[i].item()
+                    failure_points[scene_token][instance_token].append((start_frame, fde_error))
 
-    # 7. 打印最终结果
-    avg_ade = np.mean(total_ade)
-    avg_fde = np.mean(total_fde)
+    print(f"Found {sum(len(v) for v in failure_points.values())} scenes with potential critical events.")
 
-    print("\n--- Evaluation Finished ---")
-    print(f"Average Displacement Error (ADE): {avg_ade:.4f} meters")
-    print(f"Final Displacement Error (FDE):   {avg_fde:.4f} meters")
-    print(f"Visualization results are saved in '{CONFIG['output_dir']}' directory.")
+    # --- 后处理：合并连续的失败帧为事件窗口 ---
+    critical_event_index = defaultdict(list)
+    n_context = CONFIG['critical_event_context_frames']
+    hist_len = CONFIG['history_len']
+
+    for scene_token, instances in tqdm(failure_points.items(), desc="Merging events"):
+        for instance_token, points in instances.items():
+            if not points:
+                continue
+
+            # 按帧索引排序
+            points.sort()
+
+            merged_events = []
+            # 从第一个失败点开始
+            current_start, current_max_fde = points[0]
+            current_end = current_start
+
+            for i in range(1, len(points)):
+                frame_idx, fde = points[i]
+                # 如果当前帧与上一个事件窗口接近（这里定义为在历史+未来长度内），则合并
+                if frame_idx <= current_end + hist_len:
+                    current_end = frame_idx
+                    current_max_fde = max(current_max_fde, fde)
+                else:
+                    # 这是一个新事件，保存上一个事件
+                    # 扩展上下文窗口
+                    start_frame = max(0, current_start - n_context)
+                    # 结束帧是最后一个触发点的历史+未来轨迹结束点，再加上下文
+                    end_frame = current_end + hist_len + CONFIG['future_len']
+                    # 获取轨迹总长度用于裁剪
+                    full_traj_len = full_dataset.full_trajectories.get((scene_token, instance_token), []).shape[0]
+                    end_frame = min(full_traj_len, end_frame + n_context)
+
+                    merged_events.append({
+                        "instance_token": instance_token,
+                        "start_frame": start_frame,
+                        "end_frame": end_frame,
+                        "max_fde_in_event": round(current_max_fde, 2)
+                    })
+                    # 开始新的事件
+                    current_start, current_max_fde = frame_idx, fde
+                    current_end = current_start
+
+            # 保存最后一个事件
+            start_frame = max(0, current_start - n_context)
+            end_frame = current_end + hist_len + CONFIG['future_len']
+            full_traj_len = full_dataset.full_trajectories.get((scene_token, instance_token), []).shape[0]
+            end_frame = min(full_traj_len, end_frame + n_context)
+
+            merged_events.append({
+                "instance_token": instance_token,
+                "start_frame": start_frame,
+                "end_frame": end_frame,
+                "max_fde_in_event": round(current_max_fde, 2)
+            })
+
+            critical_event_index[scene_token].extend(merged_events)
+
+    # --- 保存索引文件 ---
+    output_path = CONFIG['critical_event_index_file']
+    with open(output_path, 'w') as f:
+        json.dump(critical_event_index, f, indent=4)
+
+    print(f"\n--- Critical Event Index Generation Finished ---")
+    print(f"Index saved to: {output_path}")
+    print(f"Total scenes with events: {len(critical_event_index)}")
+    total_events = sum(len(v) for v in critical_event_index.values())
+    print(f"Total event clips: {total_events}")
 
 
 if __name__ == '__main__':
