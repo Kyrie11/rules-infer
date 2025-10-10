@@ -62,18 +62,49 @@ class NuScenesTrajectoryDataset(Dataset): # ... (代码与之前完全相同，�
 
         self.sequences, self.full_trajectories = self._load_data()
 
+    # 在 NuScenesTrajectoryDataset 类中
     def _get_traffic_light_features(self, agent_pos, map_api):
-        is_near_tl, dist_to_tl = 0.0, 1.0; tl_records = map_api.get_records_in_radius(agent_pos[0], agent_pos[1], 50, ['traffic_light']);
-        if not tl_records: return np.array([is_near_tl, dist_to_tl], dtype=np.float32)
+        """
+        计算给定agent位置的交通灯特征 (修正版)
+        """
+        is_near_tl = 0.0
+        dist_to_tl = 1.0  # 归一化距离, 1.0 表示很远
+
+        # get_records_in_radius 返回一个字典, key是图层名
+        # 我们只关心 'traffic_light' 图层
+        records = map_api.get_records_in_radius(agent_pos[0], agent_pos[1], 50, ['traffic_light'])
+
+        ### MODIFICATION START ###
+        # 正确检查返回的记录
+        tl_tokens = records.get('traffic_light')
+        if not tl_tokens:
+            return np.array([is_near_tl, dist_to_tl], dtype=np.float32)
+
         min_dist = float('inf')
-        for tl_id in tl_records:
-            tl_polygon = map_api.get('traffic_light', tl_id);
-            if not tl_polygon or 'polygon_token' not in tl_polygon: continue
-            polygon = map_api.extract_polygon(tl_polygon['polygon_token']); center_point = np.mean(polygon.exterior.xy, axis=1); dist = np.linalg.norm(agent_pos - center_point);
-            if dist < min_dist: min_dist = dist
-        if min_dist < self.config['traffic_light_distance_threshold']: is_near_tl = 1.0
-        dist_to_tl = min(min_dist, self.config['traffic_light_distance_threshold']) / self.config['traffic_light_distance_threshold']
+        # 正确遍历 token 列表
+        for tl_token in tl_tokens:
+            # 使用 get 方法，并传入正确的图层名和 token
+            tl_record = map_api.get('traffic_light', tl_token)
+            if not tl_record or 'polygon_token' not in tl_record:
+                continue
+
+            polygon = map_api.extract_polygon(tl_record['polygon_token'])
+
+            # 使用简化的中心点距离作为特征
+            center_point = np.mean(polygon.exterior.xy, axis=1)
+            dist = np.linalg.norm(agent_pos - center_point)
+            if dist < min_dist:
+                min_dist = dist
+        ### MODIFICATION END ###
+
+        if min_dist < self.config['traffic_light_distance_threshold']:
+            is_near_tl = 1.0
+
+        dist_to_tl = min(min_dist, self.config['traffic_light_distance_threshold']) / self.config[
+            'traffic_light_distance_threshold']
+
         return np.array([is_near_tl, dist_to_tl], dtype=np.float32)
+
     def _load_data(self):
         all_sequences, full_trajectories = [], {}
         for scene in tqdm(self.nusc.scene, desc="Processing Scenes"):
