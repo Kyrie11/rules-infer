@@ -30,7 +30,8 @@ CONFIG = {
     'n_epochs': 50,
     'learning_rate': 0.001,
     'teacher_forcing_ratio': 0.5,  # 训练时使用真实值作为下一步输入的概率
-    'device': 'cuda' if torch.cuda.is_available() else 'cpu'
+    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+    'traffic_light_distance_threshold': 30.0
 }
 
 def train(model, iterator, optimizer, criterion, device, teacher_forcing_ratio):
