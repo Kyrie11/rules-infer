@@ -20,7 +20,7 @@ CONFIG = {
     'future_len': 12,  # 预测 6s 的未来轨迹 (12 * 0.5s)
 
     # 模型参数
-    'input_dim': 2,  # 输入维度: (x, y)
+    'input_dim': 4,  # 输入维度: (x, y)
     'hidden_dim': 64,  # LSTM 隐藏层维度
     'output_dim': 2,  # 输出维度: (x, y)
     'n_layers': 2,  # LSTM 层数
@@ -36,7 +36,7 @@ CONFIG = {
 def train(model, iterator, optimizer, criterion, device, teacher_forcing_ratio):
     model.train()
     epoch_loss = 0
-    for i, (history, future) in enumerate(tqdm(iterator, desc="Training")):
+    for i, (history, future, _) in enumerate(tqdm(iterator, desc="Training")):
         history = history.to(device)
         future = future.to(device)
 
@@ -61,7 +61,7 @@ def evaluate(model, iterator, criterion, device):
     model.eval()
     epoch_loss = 0
     with torch.no_grad():
-        for i, (history, future) in enumerate(tqdm(iterator, desc="Evaluating")):
+        for i, (history, future, _) in enumerate(tqdm(iterator, desc="Evaluating")):
             history = history.to(device)
             future = future.to(device)
 

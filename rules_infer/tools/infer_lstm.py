@@ -21,7 +21,7 @@ CONFIG = {
     # --- 模型和数据参数 (必须与训练时一致) ---
     'history_len': 8,
     'future_len': 12,
-    'input_dim': 2,  # (x, y, is_near_tl, dist_to_tl) - 如果训练时没用地图，这里是 2
+    'input_dim': 4,  # (x, y, is_near_tl, dist_to_tl) - 如果训练时没用地图，这里是 2
     'hidden_dim': 64,
     'output_dim': 2,
     'n_layers': 2,

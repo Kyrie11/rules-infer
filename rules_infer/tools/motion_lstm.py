@@ -54,15 +54,12 @@ class Seq2Seq(nn.Module):
         hidden, cell = self.encoder(src)
 
         # 使用历史轨迹的最后一个点作为解码器的第一个输入
-        input = src[:, -1, :].unsqueeze(1)
+        input = src[:, -1, :self.decoder.output_dim].unsqueeze(1)
 
         for t in range(trg_len):
             output, hidden, cell = self.decoder(input, hidden, cell)
             outputs[:, t, :] = output.squeeze(1)
 
-            # 决定是否使用 teacher forcing
             teacher_force = random.random() < teacher_forcing_ratio
-            # 如果是 teacher forcing，下一个输入是真实值；否则是当前预测值
             input = trg[:, t, :].unsqueeze(1) if teacher_force else output
-
         return outputs

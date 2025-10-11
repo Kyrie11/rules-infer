@@ -108,7 +108,13 @@ class NuScenesTrajectoryDataset(Dataset): # ... (代码与之前完全相同，�
     def _load_data(self):
         all_sequences, full_trajectories = [], {}
         for scene in tqdm(self.nusc.scene, desc="Processing Scenes"):
-            log = self.nusc.get('log', scene['log_token']); map_api = self.maps[log['location']]; first_sample_token = scene['first_sample_token']; sample = self.nusc.get('sample', first_sample_token)
+            log_record = self.nusc.get('log', scene['log_token'])
+            location = log_record['location']
+            map_api = self.maps[location]
+
+            first_sample_token = scene['first_sample_token']
+            sample = self.nusc.get('sample', first_sample_token)
+
             instance_tokens = {self.nusc.get('sample_annotation', ann_token)['instance_token'] for ann_token in sample['anns']}
             for instance_token in instance_tokens:
                 trajectory = []; current_sample_token = first_sample_token
