@@ -13,8 +13,8 @@ from rules_infer.tools.motion_lstm import Encoder, Decoder, Seq2Seq
 
 CONFIG = {
     # --- 数据和模型路径 ---
-    'dataroot': '/data0/senzeyu2/dataset/nuscenes/test/',  # <--- !!! 修改这里 !!!
-    'version': 'v1.0-test',  # 建议先用 'v1.0-mini' 测试，然后换成 'v1.0-trainval'
+    'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! 修改这里 !!!
+    'version': 'v1.0-trainval',  # 建议先用 'v1.0-mini' 测试，然后换成 'v1.0-trainval'
     'model_path': 'nuscenes-lstm-model.pt',  # 你保存的模型权重文件
     'output_dir': 'eval_results',  # 保存可视化结果的文件夹
 
@@ -32,6 +32,14 @@ CONFIG = {
 
     # --- 地图参数 (如果训练时使用了) ---
     'traffic_light_distance_threshold': 30.0,
+# 定义FDE误差超过多少米被认为是“关键事件”
+    'critical_event_threshold_fde': 2.0,  # 比如最终点误差超过2米
+
+    # 在识别出的事件窗口前后额外扩展多少帧作为上下文
+    'critical_event_context_frames': 10, # 往前和往后各扩展 10 帧 (即 5s)
+
+    # 保存最终索引文件的路径
+    'critical_event_index_file': 'critical_events.json'
 }
 
 
