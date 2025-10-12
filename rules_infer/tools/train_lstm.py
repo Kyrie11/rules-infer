@@ -13,7 +13,7 @@ from rules_infer.tools.motion_lstm import *
 CONFIG = {
     # 数据集路径，请修改为你自己的路径
     'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! 修改这里 !!!
-    'version': 'v1.0-test',  # 先用 'v1.0-mini' 测试, 跑通后再换成 'v1.0-trainval'
+    'version': 'v1.0-trainval',  # 先用 'v1.0-mini' 测试, 跑通后再换成 'v1.0-trainval'
 
     # 轨迹参数 (以 2Hz 的采样率计算)
     'history_len': 8,  # 使用 4s 的历史轨迹 (8 * 0.5s)
