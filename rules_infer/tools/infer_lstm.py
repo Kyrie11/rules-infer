@@ -32,11 +32,14 @@ CONFIG = {
 
     # --- 地图参数 (如果训练时使用了) ---
     'traffic_light_distance_threshold': 30.0,
-# 定义FDE误差超过多少米被认为是“关键事件”
+    # 定义FDE误差超过多少米被认为是“关键事件”
     'critical_event_threshold_fde': 2.0,  # 比如最终点误差超过2米
 
+    # 定义FDE误差从一帧到下一帧的增量超过多少被认为是“关键事件”
+    'critical_event_threshold_spike': 1.5,  # 例如，FDE在0.2秒内（相邻帧）增加了1.5米以上
+
     # 在识别出的事件窗口前后额外扩展多少帧作为上下文
-    'critical_event_context_frames': 10, # 往前和往后各扩展 10 帧 (即 5s)
+    'critical_event_context_frames': 10,  # 往前和往后各扩展 10 帧 (即 5s)
 
     # 保存最终索引文件的路径
     'critical_event_index_file': 'critical_events.json'
@@ -140,55 +143,113 @@ def main():
 
     # --- 第二步：按你的新逻辑处理，找到每个 agent 的最差预测点 ---
     critical_event_index = defaultdict(list)
-    n_context = 10  # 往前/往后各取10帧
+    n_context = CONFIG['critical_event_context_frames']
     fde_threshold = CONFIG['critical_event_threshold_fde']
+    spike_threshold = CONFIG['critical_event_threshold_spike']
 
-    for (scene_token, instance_token), predictions in tqdm(all_predictions.items(), desc="Finding worst-case events"):
-        if not predictions:
+    for (scene_token, instance_token), agent_predictions in tqdm(all_predictions.items(),
+                                                                 desc="Finding critical events"):
+        if not agent_predictions:
             continue
 
+        # 关键一步：必须按帧号排序，才能正确计算误差变化率
+        agent_predictions.sort(key=lambda item: item[0])
+
+        # 用于存储该 agent 已经识别出的事件中心帧，避免重复添加
+        processed_event_frames = set()
+
+        # --- 策略一：峰值误差法 (你原来的逻辑) ---
         # 找到 FDE 最大的那个预测点
-        # max() 函数的 key 参数可以让你指定按元组的哪个元素排序
-        worst_prediction = max(predictions, key=lambda item: item[1])
+        peak_fde_event = max(agent_predictions, key=lambda item: item[1])
+        peak_fde_frame, max_fde = peak_fde_event
 
-        peak_fde_frame, max_fde = worst_prediction
-
-        # 检查这个最大误差是否超过了阈值
         if max_fde > fde_threshold:
-            # 获取这个 agent 的完整轨迹长度，用于边界检查
-            full_traj_len = full_dataset.full_trajectories.get((scene_token, instance_token), np.array([])).shape[0]
-            if full_traj_len == 0:
-                continue
-
-            # 以误差最大的帧为中心，创建事件窗口
-            # peak_fde_frame 是历史轨迹的起始点，事件的中心点应该在历史轨迹结束时
             event_center_frame = peak_fde_frame + CONFIG['history_len']
 
-            start_frame = max(0, event_center_frame - n_context)
-            end_frame = min(full_traj_len, event_center_frame + n_context)
+            # 检查是否已处理过
+            if event_center_frame not in processed_event_frames:
+                # 添加到索引
+                full_traj_len = full_dataset.full_trajectories.get((scene_token, instance_token), np.array([])).shape[0]
+                if full_traj_len > 0:
+                    start_frame = max(0, event_center_frame - n_context)
+                    end_frame = min(full_traj_len, event_center_frame + n_context)
 
-            # 过滤掉窗口太短的事件
-            if end_frame - start_frame < (n_context / 2):  # 确保事件至少有一定长度
-                continue
+                    if end_frame - start_frame > (n_context / 2):
+                        critical_event_index[scene_token].append({
+                            "reason": "peak_fde",  # 标明原因
+                            "instance_token": instance_token,
+                            "start_frame": start_frame,
+                            "end_frame": end_frame,
+                            "peak_fde_frame_in_traj": event_center_frame,
+                            "value": round(max_fde, 2)  # 记录峰值FDE
+                        })
+                        processed_event_frames.add(event_center_frame)
 
-            critical_event_index[scene_token].append({
-                "instance_token": instance_token,
-                "start_frame": start_frame,
-                "end_frame": end_frame,
-                "peak_fde_frame_in_traj": event_center_frame,  # 记录峰值帧
-                "max_fde_in_traj": round(max_fde, 2)
-            })
+        # --- 策略二：误差突增法 (新逻辑) ---
+        if len(agent_predictions) > 1:
+            max_spike = 0
+            spike_event_frame = -1
+            fde_at_spike = 0
 
-    # --- 第三步：保存索引文件 (这部分不变) ---
-    output_path = CONFIG['critical_event_index_file']
-    with open(output_path, 'w') as f:
-        json.dump(critical_event_index, f, indent=4)
+            # 遍历寻找最大的FDE增量
+            for i in range(1, len(agent_predictions)):
+                current_frame, current_fde = agent_predictions[i]
+                prev_frame, prev_fde = agent_predictions[i - 1]
 
-    print(f"\n--- Critical Event Index Generation Finished (New Logic) ---")
-    print(f"Index saved to: {output_path}")
+                # 确保是连续的帧预测，如果中间有跳跃则不计算spike
+                if current_frame == prev_frame + 1:
+                    spike = current_fde - prev_fde
+                    if spike > max_spike:
+                        max_spike = spike
+                        # "事件"发生在误差突增之后的那一帧
+                        spike_event_frame = current_frame
+                        fde_at_spike = current_fde
+
+            if max_spike > spike_threshold:
+                event_center_frame = spike_event_frame + CONFIG['history_len']
+
+                # 检查是否已处理过
+                if event_center_frame not in processed_event_frames:
+                    # 添加到索引
+                    full_traj_len = \
+                    full_dataset.full_trajectories.get((scene_token, instance_token), np.array([])).shape[0]
+                    if full_traj_len > 0:
+                        start_frame = max(0, event_center_frame - n_context)
+                        end_frame = min(full_traj_len, event_center_frame + n_context)
+
+                        if end_frame - start_frame > (n_context / 2):
+                            critical_event_index[scene_token].append({
+                                "reason": "fde_spike",  # 标明原因
+                                "instance_token": instance_token,
+                                "start_frame": start_frame,
+                                "end_frame": end_frame,
+                                "peak_fde_frame_in_traj": event_center_frame,
+                                "value": round(max_spike, 2),  # 记录spike值
+                                "fde_at_spike": round(fde_at_spike, 2)  # 记录spike发生时的FDE
+                            })
+                            processed_event_frames.add(event_center_frame)
+
+        # --- 第三步：保存索引文件 (这部分不变) ---
+        # ... (保存 JSON 文件的代码保持不变) ...
+        # ... (打印统计信息的代码保持不变) ...
+
+        # 打印更详细的统计信息
+    peak_count = 0
+    spike_count = 0
+    for scene, events in critical_event_index.items():
+        for event in events:
+            if event['reason'] == 'peak_fde':
+                peak_count += 1
+            elif event['reason'] == 'fde_spike':
+                spike_count += 1
+
+    print(f"\n--- Critical Event Index Generation Finished ---")
+    print(f"Index saved to: {CONFIG['critical_event_index_file']}")
     print(f"Total scenes with events: {len(critical_event_index)}")
     total_events = sum(len(v) for v in critical_event_index.values())
     print(f"Total event clips: {total_events}")
+    print(f" - Found by Peak FDE: {peak_count}")
+    print(f" - Found by FDE Spike: {spike_count}")
 
 
 if __name__ == '__main__':
