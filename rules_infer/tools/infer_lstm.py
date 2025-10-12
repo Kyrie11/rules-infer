@@ -116,90 +116,75 @@ def main():
     # 结构: {scene_token: {instance_token: [(frame_index, fde_error), ...]}}
     failure_points = defaultdict(lambda: defaultdict(list))
 
+    all_predictions = defaultdict(list)
+
     with torch.no_grad():
-        for history, future, metadata in tqdm(data_loader, desc="Finding Failure Points"):
+        for history, future, metadata in tqdm(data_loader, desc="Predicting and Calculating FDE"):
             history, future = history.to(CONFIG['device']), future.to(CONFIG['device'])
             output = model(history, future, 0)
 
+            # 计算每个样本的 FDE
             fde_per_sample = torch.norm(output[:, -1, :] - future[:, -1, :], p=2, dim=1)
 
             for i in range(len(history)):
-                if fde_per_sample[i].item() > CONFIG['critical_event_threshold_fde']:
-                    meta = metadata[i]
-                    scene_token = meta["scene_token"]
-                    instance_token = meta["instance_token"]
-                    # 记录的是历史轨迹的起始帧
-                    start_frame = meta["start_index_in_full_traj"]
-                    fde_error = fde_per_sample[i].item()
-                    failure_points[scene_token][instance_token].append((start_frame, fde_error))
+                meta = metadata[i]
+                scene_token = meta["scene_token"]
+                instance_token = meta["instance_token"]
+                start_frame = meta["start_index_in_full_traj"]
+                fde_error = fde_per_sample[i].item()
 
-    print(f"Found {sum(len(v) for v in failure_points.values())} scenes with potential critical events.")
+                # 记录每个预测点的起始帧和对应的FDE
+                all_predictions[(scene_token, instance_token)].append((start_frame, fde_error))
 
-    # --- 后处理：合并连续的失败帧为事件窗口 ---
+    print(f"Finished prediction for all {len(all_predictions)} unique trajectories.")
+
+    # --- 第二步：按你的新逻辑处理，找到每个 agent 的最差预测点 ---
     critical_event_index = defaultdict(list)
-    n_context = CONFIG['critical_event_context_frames']
-    hist_len = CONFIG['history_len']
+    n_context = 10  # 往前/往后各取10帧
+    fde_threshold = CONFIG['critical_event_threshold_fde']
 
-    for scene_token, instances in tqdm(failure_points.items(), desc="Merging events"):
-        for instance_token, points in instances.items():
-            if not points:
+    for (scene_token, instance_token), predictions in tqdm(all_predictions.items(), desc="Finding worst-case events"):
+        if not predictions:
+            continue
+
+        # 找到 FDE 最大的那个预测点
+        # max() 函数的 key 参数可以让你指定按元组的哪个元素排序
+        worst_prediction = max(predictions, key=lambda item: item[1])
+
+        peak_fde_frame, max_fde = worst_prediction
+
+        # 检查这个最大误差是否超过了阈值
+        if max_fde > fde_threshold:
+            # 获取这个 agent 的完整轨迹长度，用于边界检查
+            full_traj_len = full_dataset.full_trajectories.get((scene_token, instance_token), np.array([])).shape[0]
+            if full_traj_len == 0:
                 continue
 
-            # 按帧索引排序
-            points.sort()
+            # 以误差最大的帧为中心，创建事件窗口
+            # peak_fde_frame 是历史轨迹的起始点，事件的中心点应该在历史轨迹结束时
+            event_center_frame = peak_fde_frame + CONFIG['history_len']
 
-            merged_events = []
-            # 从第一个失败点开始
-            current_start, current_max_fde = points[0]
-            current_end = current_start
+            start_frame = max(0, event_center_frame - n_context)
+            end_frame = min(full_traj_len, event_center_frame + n_context)
 
-            for i in range(1, len(points)):
-                frame_idx, fde = points[i]
-                # 如果当前帧与上一个事件窗口接近（这里定义为在历史+未来长度内），则合并
-                if frame_idx <= current_end + hist_len:
-                    current_end = frame_idx
-                    current_max_fde = max(current_max_fde, fde)
-                else:
-                    # 这是一个新事件，保存上一个事件
-                    # 扩展上下文窗口
-                    start_frame = max(0, current_start - n_context)
-                    # 结束帧是最后一个触发点的历史+未来轨迹结束点，再加上下文
-                    end_frame = current_end + hist_len + CONFIG['future_len']
-                    # 获取轨迹总长度用于裁剪
-                    full_traj_len = full_dataset.full_trajectories.get((scene_token, instance_token), []).shape[0]
-                    end_frame = min(full_traj_len, end_frame + n_context)
+            # 过滤掉窗口太短的事件
+            if end_frame - start_frame < (n_context / 2):  # 确保事件至少有一定长度
+                continue
 
-                    merged_events.append({
-                        "instance_token": instance_token,
-                        "start_frame": start_frame,
-                        "end_frame": end_frame,
-                        "max_fde_in_event": round(current_max_fde, 2)
-                    })
-                    # 开始新的事件
-                    current_start, current_max_fde = frame_idx, fde
-                    current_end = current_start
-
-            # 保存最后一个事件
-            start_frame = max(0, current_start - n_context)
-            end_frame = current_end + hist_len + CONFIG['future_len']
-            full_traj_len = full_dataset.full_trajectories.get((scene_token, instance_token), []).shape[0]
-            end_frame = min(full_traj_len, end_frame + n_context)
-
-            merged_events.append({
+            critical_event_index[scene_token].append({
                 "instance_token": instance_token,
                 "start_frame": start_frame,
                 "end_frame": end_frame,
-                "max_fde_in_event": round(current_max_fde, 2)
+                "peak_fde_frame_in_traj": event_center_frame,  # 记录峰值帧
+                "max_fde_in_traj": round(max_fde, 2)
             })
 
-            critical_event_index[scene_token].extend(merged_events)
-
-    # --- 保存索引文件 ---
+    # --- 第三步：保存索引文件 (这部分不变) ---
     output_path = CONFIG['critical_event_index_file']
     with open(output_path, 'w') as f:
         json.dump(critical_event_index, f, indent=4)
 
-    print(f"\n--- Critical Event Index Generation Finished ---")
+    print(f"\n--- Critical Event Index Generation Finished (New Logic) ---")
     print(f"Index saved to: {output_path}")
     print(f"Total scenes with events: {len(critical_event_index)}")
     total_events = sum(len(v) for v in critical_event_index.values())
