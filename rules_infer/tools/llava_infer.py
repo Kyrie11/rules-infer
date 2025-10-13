@@ -1,13 +1,11 @@
 import json
 import os
-from collections import defaultdict
 import numpy as np
 import cv2
 from PIL import Image
-from tqdm import tqdm
-
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.geometry_utils import view_points, box_in_image, BoxVisibility
+from nuscenes.utils.data_classes import Box  # 需要导入Box
 from pyquaternion import Quaternion
 
 # --- Llava 调用相关的库 ---
@@ -116,7 +114,7 @@ def select_best_camera_view(nusc, sample_token, agent_coords_3d):
     return best_cam if best_cam else sample_rec['data']['CAM_FRONT']
 
 
-def draw_on_image(nusc, sample_token, cam_token, event_data, full_trajectories):
+def draw_on_image(nusc, sample_token, cam_token, event_data, full_trajectories, frame_idx):
     """在选定的图像上绘制所有标注"""
     sd_rec = nusc.get('sample_data', cam_token)
     cs_rec = nusc.get('calibrated_sensor', sd_rec['calibrated_sensor_token'])
@@ -124,16 +122,16 @@ def draw_on_image(nusc, sample_token, cam_token, event_data, full_trajectories):
     image = cv2.imread(image_path)
 
     # 获取当前帧的绝对索引
-    sample_rec = nusc.get('sample', sample_token)
-    scene_rec = nusc.get('scene', sample_rec['scene_token'])
+    # sample_rec = nusc.get('sample', sample_token)
+    # scene_rec = nusc.get('scene', sample_rec['scene_token'])
     scene_name = scene_rec['name']
 
     # 找到当前帧在场景中的索引
-    current_sample_token = scene_rec['first_sample_token']
-    frame_idx = 0
-    while current_sample_token != sample_token:
-        current_sample_token = nusc.get('sample', current_sample_token)['next']
-        frame_idx += 1
+    # current_sample_token = scene_rec['first_sample_token']
+    # frame_idx = 0
+    # while current_sample_token != sample_token:
+    #     current_sample_token = nusc.get('sample', current_sample_token)['next']
+    #     frame_idx += 1
 
     key_agent_token = event_data['instance_token']
     interacting_tokens = event_data.get('interactions', {}).get(str(frame_idx), [])
@@ -141,6 +139,15 @@ def draw_on_image(nusc, sample_token, cam_token, event_data, full_trajectories):
     # 绘制锚框
     for agent_token in [key_agent_token] + interacting_tokens:
         color = COLOR_KEY_AGENT if agent_token == key_agent_token else COLOR_INTERACTING
+        ann_rec = get_annotation_for_instance(nusc, sample_token, agent_token)
+        if ann_rec:  # 确保找到了annotation
+            box = Box(ann_rec['translation'], ann_rec['size'], Quaternion(ann_rec['rotation']))
+            # ... 后续的渲染代码
+        else:
+            # Agent可能在这一帧不存在
+            print(f"Warning: Instance {agent_token} not found in sample {sample_token}.")
+            continue
+
         try:
             ann_token = nusc.get_sample_annotation_token(sample_token, agent_token)
             ann_rec = nusc.get('sample_annotation', ann_token)
@@ -156,17 +163,22 @@ def draw_on_image(nusc, sample_token, cam_token, event_data, full_trajectories):
     # 绘制轨迹 (只在 t0 帧绘制)
     if frame_idx == event_data['peak_fde_frame_in_traj']:
         # 真实轨迹
-        gt_traj_world = full_trajectories[key_agent_token][frame_idx: frame_idx + 12]  # 未来12帧
+        gt_traj_world = full_trajectories[key_agent_token][frame_idx: frame_idx + 12]
         if gt_traj_world.shape[0] > 1:
-            points = np.vstack((gt_traj_world[:, 0], gt_traj_world[:, 1], np.zeros(gt_traj_world.shape[0])))
+            # gt_traj_world 本身就是 (N, 3) 的，直接转置
+            points = gt_traj_world.T  # Shape (3, N)
             points_cam = nusc.map_pointcloud_to_image(points, cam_token)
             points_2d = points_cam[:2, :].astype(np.int32)
             cv2.polylines(image, [points_2d.T], isClosed=False, color=COLOR_GT_TRAJ, thickness=3)
 
         # 预测轨迹
-        pred_traj_world = np.array(event_data['predicted_trajectory'])
+        pred_traj_world = np.array(event_data['predicted_trajectory'])  # 假设这个是 (N, 2)
         if pred_traj_world.shape[0] > 1:
-            points = np.vstack((pred_traj_world[:, 0], pred_traj_world[:, 1], np.zeros(pred_traj_world.shape[0])))
+            # 对于预测轨迹，如果只有(x, y)，一个合理的做法是使用当前帧agent的高度作为Z坐标
+            # 或者从真实轨迹的第一个点获取Z坐标
+            z_coord = full_trajectories[key_agent_token][frame_idx][2]
+            z_coords = np.full(pred_traj_world.shape[0], z_coord)
+            points = np.vstack((pred_traj_world[:, 0], pred_traj_world[:, 1], z_coords))
             points_cam = nusc.map_pointcloud_to_image(points, cam_token)
             points_2d = points_cam[:2, :].astype(np.int32)
             cv2.polylines(image, [points_2d.T], isClosed=False, color=COLOR_PRED_TRAJ, thickness=3,
@@ -179,6 +191,14 @@ def draw_on_image(nusc, sample_token, cam_token, event_data, full_trajectories):
 
     return Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
 
+def get_annotation_for_instance(nusc, sample_token, instance_token):
+    """在一个sample中查找特定instance的annotation。"""
+    sample_rec = nusc.get('sample', sample_token)
+    for ann_token in sample_rec['anns']:
+        ann_rec = nusc.get('sample_annotation', ann_token)
+        if ann_rec['instance_token'] == instance_token:
+            return ann_rec
+    return None # 如果该instance在这一帧不可见，则返回None
 
 def build_vlm_prompt(case_data, event):
     """构建VLM的文本prompt"""
@@ -223,6 +243,8 @@ def build_vlm_prompt(case_data, event):
 
 
 if __name__=="__main__":
+    nusc = NuScenes(version=NUSCENES_VERSION, dataroot=NUSCENES_DATAROOT, verbose=False)
+
     # 加载Llava模型
     model = LlavaForConditionalGeneration.from_pretrained(
         LLAVA_MODEL_ID,
@@ -276,12 +298,12 @@ if __name__=="__main__":
                                   event.get('interactions', {}).get(str(frame_idx), [])]
             all_relevant_coords = [key_agent_coord] + interacting_coords
 
-            from nuscenes.utils.data_classes import Box  # 需要导入Box
+
 
             best_cam_token = select_best_camera_view(nusc, sample_token, all_relevant_coords)
 
             # 6. 绘制图像
-            annotated_image = draw_on_image(nusc, sample_token, best_cam_token, event, full_trajectories)
+            annotated_image = draw_on_image(nusc, sample_token, best_cam_token, event, full_trajectories, frame_idx)
             images_for_vlm.append(annotated_image)
 
             # 保存用于调试
