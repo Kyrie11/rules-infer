@@ -318,6 +318,15 @@ def main():
     with open(output_path, 'w') as f:
         json.dump(critical_event_index, f, indent=4)
 
+        # 打印更详细的统计信息
+    peak_count = 0
+    spike_count = 0
+    for scene, events in critical_event_index.items():
+        for event in events:
+            if event['reason'] == 'peak_fde':
+                peak_count += 1
+            elif event['reason'] == 'fde_spike':
+                spike_count += 1
     print(f"\n--- Critical Event Index Generation Finished ---")
     print(f"Index saved to: {output_path}")
 
