@@ -242,6 +242,9 @@ def main():
                 peak_count += 1
             elif event['reason'] == 'fde_spike':
                 spike_count += 1
+    output_path = CONFIG['critical_event_index_file']
+    with open(output_path, 'w') as f:
+        json.dump(critical_event_index, f, indent=4)
 
     print(f"\n--- Critical Event Index Generation Finished ---")
     print(f"Index saved to: {CONFIG['critical_event_index_file']}")
