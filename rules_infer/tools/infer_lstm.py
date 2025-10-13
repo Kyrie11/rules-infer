@@ -155,7 +155,12 @@ def collate_fn_with_meta(batch):
 def main():
     print(f"Using device: {CONFIG['device']}")
     nusc = NuScenes(version=CONFIG['version'], dataroot=CONFIG['dataroot'], verbose=False)
-
+    encoder = Encoder(CONFIG['input_dim'], CONFIG['hidden_dim'], CONFIG['n_layers'])
+    decoder = Decoder(CONFIG['output_dim'], CONFIG['hidden_dim'], CONFIG['n_layers'])
+    model = Seq2Seq(encoder, decoder, CONFIG['device']).to(CONFIG['device'])
+    model.load_state_dict(torch.load(CONFIG['model_path'], map_location=CONFIG['device']))
+    print(f"Model loaded from {CONFIG['model_path']}")
+    model.eval()
     # 我们需要在整个数据集上挖掘，而不仅仅是验证集
     # 如果数据集很大，可以考虑只用 val_dataset
     full_dataset = NuScenesTrajectoryDataset(nusc, CONFIG)
@@ -165,12 +170,7 @@ def main():
                              collate_fn=collate_fn_with_meta)
 
     # 加载模型
-    encoder = Encoder(CONFIG['input_dim'], CONFIG['hidden_dim'], CONFIG['n_layers'])
-    decoder = Decoder(CONFIG['output_dim'], CONFIG['hidden_dim'], CONFIG['n_layers'])
-    model = Seq2Seq(encoder, decoder, CONFIG['device']).to(CONFIG['device'])
-    model.load_state_dict(torch.load(CONFIG['model_path'], map_location=CONFIG['device']))
-    print(f"Model loaded from {CONFIG['model_path']}")
-    model.eval()
+
 
     ### NEW/MODIFIED ###
     # 用于存储每个场景中每个 agent 的失败帧
