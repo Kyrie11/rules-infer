@@ -58,60 +58,105 @@ def get_full_trajectory_data(nusc, scene_token, instance_token):
 
 def select_best_camera_view(nusc, sample_token, agent_coords_3d):
     """
-    基于agent在3D空间中的位置，选择最佳的摄像头视角
-    agent_coords_3d: list of 3D coordinates [[x,y,z], ...]
+    基于agent在3D空间中的位置，选择最佳的摄像头视角。
+    这个版本会优先选择能清晰展示关键agent, 并同时包含尽可能多交互agent的视角。
+
+    Args:
+        nusc (NuScenes): NuScenes API instance.
+        sample_token (str): The token of the sample to render.
+        agent_coords_3d (list): A list of 3D coordinates [[x,y,z], ...].
+                                **CRITICAL ASSUMPTION**: The first element agent_coords_3d[0]
+                                is the key agent, and the rest are interacting agents.
+    Returns:
+        str: The token of the best camera sample_data.
     """
-    best_cam = None
-    max_score = -1
+    if not agent_coords_3d:
+        # 如果没有提供任何agent坐标，直接返回前置摄像头作为安全默认值
+        sample_rec = nusc.get('sample', sample_token)
+        return sample_rec['data']['CAM_FRONT']
+
+    best_cam_token = None
+    max_score = -1.0
 
     sample_rec = nusc.get('sample', sample_token)
 
-    for cam_token in sample_rec['data']:
-        if 'CAM' not in nusc.get('sample_data', cam_token)['channel']:
+    # 遍历该sample中的所有摄像头数据
+    for cam_channel, cam_token in sample_rec['data'].items():
+        if not cam_channel.startswith('CAM'):
             continue
 
         sd_rec = nusc.get('sample_data', cam_token)
         cs_rec = nusc.get('calibrated_sensor', sd_rec['calibrated_sensor_token'])
+        cam_intrinsic = np.array(cs_rec['camera_intrinsic'])
+        imsize = (sd_rec['width'], sd_rec['height'])
 
-        cam_points = []
-        visible_agents = 0
-        total_area = 0
+        # --- 初始化当前视角的评分变量 ---
+        key_agent_visible = False
+        key_agent_area = 0.0
+        visible_interacting_agents_count = 0
+        total_interacting_area = 0.0
 
-        for agent_coord in agent_coords_3d:
-            # 创建一个虚拟的box用于投影
+        # 遍历所有需要关注的agent
+        for i, agent_coord in enumerate(agent_coords_3d):
+            # 创建一个标准的虚拟box用于投影 (尺寸可以根据agent类型调整，但这里用统一尺寸)
             box = Box(agent_coord, [1.8, 4.5, 1.5], Quaternion(axis=[0, 0, 1], angle=0))
 
-            if not box_in_image(box, np.array(cs_rec['camera_intrinsic']), (sd_rec['width'], sd_rec['height'])):
+            # 快速检查box是否可能在图像内，以节省计算
+            if not box_in_image(box, cam_intrinsic, imsize, vis_level=BoxVisibility.ANY):
                 continue
 
+            # --- 精确计算2D包围盒 ---
             # 转换到相机坐标系
             box.translate(-np.array(cs_rec['translation']))
             box.rotate(Quaternion(cs_rec['rotation']).inverse)
 
             # 投影到2D图像
             corners_3d = box.corners()
-            corners_2d = view_points(corners_3d, np.array(cs_rec['camera_intrinsic']), normalize=True)[:2, :]
+            corners_2d = view_points(corners_3d, cam_intrinsic, normalize=True)[:2, :]
 
-            x_min, y_min = corners_2d.min(axis=1)
-            x_max, y_max = corners_2d.max(axis=1)
+            # 计算2D包围盒并裁剪到图像边界内
+            x_min, y_min = np.maximum(0, corners_2d.min(axis=1))
+            x_max, y_max = np.minimum(imsize, corners_2d.max(axis=1))
 
-            # 检查是否在图像边界内
-            if x_max < 0 or x_min > sd_rec['width'] or y_max < 0 or y_min > sd_rec['height']:
+            # 如果裁剪后box的宽或高为0，则跳过
+            if x_max <= x_min or y_max <= y_min:
                 continue
 
-            visible_agents += 1
-            total_area += (x_max - x_min) * (y_max - y_min)
+            area = (x_max - x_min) * (y_max - y_min)
 
-        if visible_agents == 0:
-            continue
+            # 根据是关键agent还是交互agent，记录信息
+            if i == 0:  # 关键agent (基于约定)
+                key_agent_visible = True
+                key_agent_area = area
+            else:  # 交互agent
+                visible_interacting_agents_count += 1
+                total_interacting_area += area
 
-        # 分数 = 可见agent数 * 平均面积 (简单启发式)
-        score = visible_agents * (total_area / len(agent_coords_3d))
+        # --- 核心评分逻辑 ---
+        # 规则1: 关键agent必须可见，否则该视角无效
+        if not key_agent_visible:
+            score = 0.0
+        else:
+            # 权重可以根据研究需求进行微调
+            # W_KEY_AGENT_AREA: 关键agent的面积权重 (最重要)
+            # W_INTERACTING_COUNT: 每个可见的交互agent带来的固定奖励 (鼓励包含更多agent)
+            # W_INTERACTING_AREA: 交互agent的面积权重 (次要，锦上添花)
+            W_KEY_AGENT_AREA = 10.0
+            W_INTERACTING_COUNT = 5000.0
+            W_INTERACTING_AREA = 0.5
+
+            # 计算总分
+            score = (W_KEY_AGENT_AREA * key_agent_area +
+                     W_INTERACTING_COUNT * visible_interacting_agents_count +
+                     W_INTERACTING_AREA * total_interacting_area)
+
+        # 更新最佳视角
         if score > max_score:
             max_score = score
-            best_cam = cam_token
+            best_cam_token = cam_token
 
-    return best_cam if best_cam else sample_rec['data']['CAM_FRONT']
+    # 如果因为某种原因没有找到任何合适的视角（例如所有agent都在车后），则提供一个默认的前置视角
+    return best_cam_token if best_cam_token else sample_rec['data']['CAM_FRONT']
 
 
 def draw_on_image(nusc, sample_token, cam_token, event_data, full_trajectories, frame_idx):
