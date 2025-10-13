@@ -65,7 +65,7 @@ def find_interacting_agents(key_agent_token, scene_token, frame_idx, full_trajec
 
     # 2. 近似计算关键agent的朝向向量
     key_heading_vec = None
-    if frame_idx > 0:
+    if frame_idx > 0 and len(key_traj) > frame_idx: # <-- 增加 len 检查
         prev_pos = key_traj[frame_idx - 1]
         # 确保agent在移动，否则没有朝向
         if np.linalg.norm(key_pos - prev_pos) > 0.1:
@@ -177,6 +177,7 @@ def main():
     # 结构: {scene_token: {instance_token: [(frame_index, fde_error), ...]}}
     failure_points = defaultdict(lambda: defaultdict(list))
 
+
     all_predictions = defaultdict(list)
 
     with torch.no_grad():
@@ -194,9 +195,16 @@ def main():
                 start_frame = meta["start_index_in_full_traj"]
                 fde_error = fde_per_sample[i].item()
 
-                # 记录每个预测点的起始帧和对应的FDE
-                all_predictions[(scene_token, instance_token)].append((start_frame, fde_error))
+                ### MODIFICATION START ###
+                # 模型输出已经是世界坐标，直接使用即可
+                pred_future_coords = output[i].cpu().numpy()
 
+                # 记录每个预测点的起始帧和对应的FDE
+                all_predictions[(scene_token, instance_token)].append({
+                    "start_frame": start_frame,
+                    "fde_error": fde_error,
+                    "pred_trajectory": pred_future_coords.tolist()  # 保存为 list
+                })
     print(f"Finished prediction for all {len(all_predictions)} unique trajectories.")
 
     # 提前构建一个场景到所有agents的映射，避免在循环中重复查找，提高效率
@@ -221,7 +229,7 @@ def main():
             continue
 
         # 关键一步：必须按帧号排序，才能正确计算误差变化率
-        agent_predictions.sort(key=lambda item: item[0])
+        agent_predictions.sort(key=lambda item: item["start_frame"])
 
         # 用于存储该 agent 已经识别出的事件中心帧，避免重复添加
         processed_event_frames = set()
@@ -259,53 +267,52 @@ def main():
                     heading_thresh_deg=heading_thresh_deg
                 )
                 if interacting_tokens:  # 只记录有交互对象的帧
-                    interactions_per_frame[frame_idx] = interacting_tokens
+                    interactions_per_frame[str(frame_idx)] = interacting_tokens
             event_data["interactions"] = interactions_per_frame
             critical_event_index[scene_token].append(event_data)
             processed_event_frames.add(center_frame)
         # --- 策略一：峰值误差法 (你原来的逻辑) ---
-        # 找到 FDE 最大的那个预测点
-        peak_fde_event = max(agent_predictions, key=lambda item: item[1])
-        peak_fde_frame, max_fde = peak_fde_event
+            # --- 策略一：峰值误差法 (修正后) ---
+            if agent_predictions:
+                peak_fde_event = max(agent_predictions, key=lambda item: item["fde_error"])
+                peak_fde_frame = peak_fde_event["start_frame"]
+                max_fde = peak_fde_event["fde_error"]
+                pred_traj_for_peak = peak_fde_event["pred_trajectory"]
 
-        if max_fde > fde_threshold:
-            event_center_frame = peak_fde_frame + CONFIG['history_len']
-            event_info = {
-                "reason": "peak_fde",
-                "instance_token": instance_token,
-                "peak_fde_frame_in_traj": event_center_frame,
-                "value": round(max_fde, 2)
-            }
-            process_and_add_event(event_info)
+                if max_fde > fde_threshold:
+                    event_center_frame = peak_fde_frame + CONFIG['history_len']
+                    event_info = {
+                        "reason": "peak_fde", "instance_token": instance_token,
+                        "peak_fde_frame_in_traj": event_center_frame,
+                        "value": round(max_fde, 2), "predicted_trajectory": pred_traj_for_peak
+                    }
+                    process_and_add_event(event_info)
 
         # --- 策略二：误差突增法 (新逻辑) ---
         if len(agent_predictions) > 1:
-            max_spike = 0
-            spike_event_frame = -1
-            fde_at_spike = 0
+            max_spike, spike_event_frame, fde_at_spike = 0, -1, 0
+            pred_traj_for_spike = None
 
             # 遍历寻找最大的FDE增量
             for i in range(1, len(agent_predictions)):
-                current_frame, current_fde = agent_predictions[i]
-                prev_frame, prev_fde = agent_predictions[i - 1]
+                current_pred = agent_predictions[i]
+                prev_pred = agent_predictions[i - 1]
 
-                # 确保是连续的帧预测，如果中间有跳跃则不计算spike
-                if current_frame == prev_frame + 1:
-                    spike = current_fde - prev_fde
+                if current_pred["start_frame"] == prev_pred["start_frame"] + 1:
+                    spike = current_pred["fde_error"] - prev_pred["fde_error"]
                     if spike > max_spike:
                         max_spike = spike
-                        # "事件"发生在误差突增之后的那一帧
-                        spike_event_frame = current_frame
-                        fde_at_spike = current_fde
+                        spike_event_frame = current_pred["start_frame"]
+                        fde_at_spike = current_pred["fde_error"]
+                        pred_traj_for_spike = current_pred["pred_trajectory"]
 
-            if max_spike > spike_threshold:
+            if max_spike > spike_threshold and spike_event_frame != -1:
                 event_center_frame = spike_event_frame + CONFIG['history_len']
                 event_info = {
-                    "reason": "fde_spike",
-                    "instance_token": instance_token,
+                    "reason": "fde_spike", "instance_token": instance_token,
                     "peak_fde_frame_in_traj": event_center_frame,
-                    "value": round(max_spike, 2),
-                    "fde_at_spike": round(fde_at_spike, 2)
+                    "value": round(max_spike, 2), "fde_at_spike": round(fde_at_spike, 2),
+                    "predicted_trajectory": pred_traj_for_spike
                 }
                 process_and_add_event(event_info)
 
@@ -327,7 +334,6 @@ def main():
                 peak_count += 1
             elif event['reason'] == 'fde_spike':
                 spike_count += 1
-    print(f"\n--- Critical Event Index Generation Finished ---")
     print(f"Index saved to: {output_path}")
 
     print(f"\n--- Critical Event Index Generation Finished ---")
