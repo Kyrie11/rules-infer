@@ -7,7 +7,7 @@ from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.geometry_utils import view_points, box_in_image, BoxVisibility
 from nuscenes.utils.data_classes import Box  # 需要导入Box
 from pyquaternion import Quaternion
-
+import textwrap
 # --- Llava 调用相关的库 ---
 import torch
 from transformers import AutoProcessor, LlavaForConditionalGeneration
@@ -287,6 +287,122 @@ def build_vlm_prompt(case_data, event):
     }}"""
 
 
+def visualize_vlm_result(annotated_images: list, vlm_analysis_json: dict, case_id: str,
+                    output_dir: str, timestamps: list, visible: bool = False
+):
+    """
+        将VLM的输入图像和输出分析文本合成为一张图片，用于可视化和调试。
+
+        Args:
+            annotated_images (list): 提供给VLM的PIL Image对象列表。
+            vlm_analysis_json (dict): 从VLM响应中解析出的JSON对象。
+            case_id (str): 案例的唯一标识符，用于命名输出文件。
+            output_dir (str): 保存可视化结果的目录。
+            timestamps (list): 与annotated_images对应的每个图像的时间戳字符串列表。
+            visible (bool): 是否在桌面上显示图像。默认为False。
+        """
+    if not annotated_images or not vlm_analysis_json:
+        print(f"Warning: [Visualizer] Missing images or analysis for case {case_id}. Skipping visualization.")
+        return
+
+        # --- 1. 定义布局和样式常量 ---
+    PADDING = 20
+    HEADER_HEIGHT = 60
+    TEXT_BG_COLOR = (40, 40, 40)  # 深灰色背景
+    TEXT_COLOR = (255, 255, 255)  # 白色文字
+    HEADER_COLOR = (0, 0, 0)  # 黑色标题
+    FONT = cv2.FONT_HERSHEY_SIMPLEX
+    FONT_SCALE_TEXT = 0.7
+    FONT_SCALE_HEADER = 1.0
+    LINE_THICKNESS = 1
+    LINE_SPACING = 30
+
+    # --- 2. 准备图像部分 ---
+    # 将PIL图像转换为OpenCV格式 (BGR)
+    cv_images = [cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR) for img in annotated_images]
+
+    # 假设所有图像尺寸相同
+    img_h, img_w, _ = cv_images[0].shape
+    num_images = len(cv_images)
+
+    # 水平拼接图像
+    stitched_images = np.concatenate(cv_images, axis=1)
+
+    # --- 3. 准备文本部分 ---
+    # 格式化VLM分析文本
+    analysis_text = vlm_analysis_json.get("analysis", {})
+    obs = analysis_text.get("direct_observation", "N/A")
+    causal = analysis_text.get("causal_inference", "N/A")
+    social = analysis_text.get("social_inference", "N/A")
+    summary = vlm_analysis_json.get("implicit_rule_summary", "N/A")
+
+    full_text = (
+        f"--- Direct Observation ---\n{obs}\n\n"
+        f"--- Causal Inference ---\n{causal}\n\n"
+        f"--- Social Inference ---\n{social}\n\n"
+        f"--- Implicit Rule Summary ---\n{summary}"
+    )
+
+    # 自动换行以适应图像总宽度
+    wrapper = textwrap.TextWrapper(width=int(stitched_images.shape[1] / (FONT_SCALE_TEXT * 15)))  # 启发式宽度
+    wrapped_lines = []
+    for line in full_text.split('\n'):
+        wrapped_lines.extend(wrapper.wrap(line) if line.strip() != "" else [""])
+
+    # --- 4. 创建最终的画布 ---
+    text_area_height = len(wrapped_lines) * LINE_SPACING + PADDING * 2
+    canvas_h = img_h + HEADER_HEIGHT + text_area_height
+    canvas_w = stitched_images.shape[1]
+
+    # 创建白色画布
+    canvas = np.full((canvas_h, canvas_w, 3), 255, dtype=np.uint8)
+
+    # --- 5. 组合所有元素到画布上 ---
+    # 粘贴拼接好的图像
+    canvas[HEADER_HEIGHT: HEADER_HEIGHT + img_h, :] = stitched_images
+
+    # 在每张子图下方添加时间戳
+    for i, timestamp in enumerate(timestamps):
+        text_size, _ = cv2.getTextSize(timestamp, FONT, 0.8, 2)
+        text_x = i * img_w + (img_w - text_size[0]) // 2
+        text_y = HEADER_HEIGHT + img_h - PADDING
+        cv2.putText(canvas, timestamp, (text_x, text_y), FONT, 0.8, (0, 0, 0), 3, cv2.LINE_AA)  # 带黑色描边
+        cv2.putText(canvas, timestamp, (text_x, text_y), FONT, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+
+    # 绘制文本区域背景
+    text_bg_y_start = HEADER_HEIGHT + img_h
+    cv2.rectangle(canvas, (0, text_bg_y_start), (canvas_w, canvas_h), TEXT_BG_COLOR, -1)
+
+    # 绘制标题
+    cv2.putText(canvas, f"VLM Analysis: {case_id}", (PADDING, HEADER_HEIGHT - 20), FONT, FONT_SCALE_HEADER,
+                HEADER_COLOR, 2)
+
+    # 逐行写入VLM分析文本
+    y_text = text_bg_y_start + PADDING + 20
+    for line in wrapped_lines:
+        cv2.putText(canvas, line, (PADDING, y_text), FONT, FONT_SCALE_TEXT, TEXT_COLOR, LINE_THICKNESS, cv2.LINE_AA)
+        y_text += LINE_SPACING
+
+    # --- 6. 保存并显示 ---
+    output_path = os.path.join(output_dir, f"{case_id}_visualization.png")
+    cv2.imwrite(output_path, canvas)
+    print(f"Visualization saved to {output_path}")
+
+    if visible:
+        # 调整显示尺寸以适应屏幕
+        display_h, display_w = 1000, 1800
+        h, w, _ = canvas.shape
+        scale = min(display_h / h, display_w / w)
+        if scale < 1.0:
+            resized_canvas = cv2.resize(canvas, (int(w * scale), int(h * scale)))
+        else:
+            resized_canvas = canvas
+
+        cv2.imshow(f'VLM Analysis - {case_id}', resized_canvas)
+        print("Press any key in the display window to continue...")
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+
 if __name__=="__main__":
     nusc = NuScenes(version=NUSCENES_VERSION, dataroot=NUSCENES_DATAROOT, verbose=False)
 
@@ -331,10 +447,13 @@ if __name__=="__main__":
         sample_tokens = nusc.get_sample_tokens_in_scene(scene_token)
 
         images_for_vlm = []
-        for frame_idx in sorted(list(sampled_frames)):
+        sampled_frame_indices = sorted(list(sampled_frames))
+        timestamps_for_vis = []
+        for frame_idx in sampled_frame_indices:
             if not (event['start_frame'] <= frame_idx < event['end_frame']):
                 continue
-
+            relative_time = (frame_idx - event['peak_fde_frame_in_traj']) * 0.5
+            timestamps_for_vis.append(f"t{relative_time:+.1f}s" if relative_time != 0 else "t0")
             sample_token = sample_tokens[frame_idx]
 
             # 5. 最佳视角选择
@@ -376,6 +495,14 @@ if __name__=="__main__":
             with open(output_filepath, 'w') as f:
                 json.dump(analysis_data, f, indent=4)
             print(f"Analysis saved to {output_filepath}")
+            visualize_vlm_result(
+                annotated_images=images_for_vlm,
+                vlm_analysis_json=analysis_data,
+                case_id=case_id,
+                output_dir=OUTPUT_DIR,
+                timestamps=timestamps_for_vis,
+                visible=False  # 在服务器上运行时设为 False
+            )
 
         except Exception as e:
             print(f"Failed to parse VLM response for {case_id}: {e}")
