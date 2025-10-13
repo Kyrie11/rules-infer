@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from nuscenes.nuscenes import NuScenes
 from nuscenes.map_expansion.map_api import NuScenesMap
 from collections import defaultdict
-
+import numpy as np
 from rules_infer.dataset.nuscenes import NuScenesTrajectoryDataset
 from rules_infer.tools.motion_lstm import Encoder, Decoder, Seq2Seq
 
