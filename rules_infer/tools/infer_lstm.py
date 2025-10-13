@@ -41,10 +41,68 @@ CONFIG = {
     # 在识别出的事件窗口前后额外扩展多少帧作为上下文
     'critical_event_context_frames': 10,  # 往前和往后各扩展 10 帧 (即 5s)
 
+    # --- 交互分析参数 ---
+    'interaction_proximity_threshold': 25.0,  # 交互距离阈值（米）
+    'interaction_heading_threshold_deg': 90.0, # 前方视角阈值（度）
+
     # 保存最终索引文件的路径
     'critical_event_index_file': 'critical_events.json'
 }
 
+
+def find_interacting_agents(key_agent_token, scene_token, frame_idx, full_trajectories, all_agents_in_scene,
+                            proximity_thresh, heading_thresh_deg):
+    """
+    在指定场景的某一帧中，寻找与关键agent有交互的其他agent。
+    """
+    interacting_agents = []
+
+    # 1. 获取关键agent在当前帧的状态
+    key_traj = full_trajectories.get((scene_token, key_agent_token))
+    if key_traj is None or frame_idx >= len(key_traj):
+        return []
+    key_pos = key_traj[frame_idx]
+
+    # 2. 近似计算关键agent的朝向向量
+    key_heading_vec = None
+    if frame_idx > 0:
+        prev_pos = key_traj[frame_idx - 1]
+        # 确保agent在移动，否则没有朝向
+        if np.linalg.norm(key_pos - prev_pos) > 0.1:
+            key_heading_vec = key_pos - prev_pos
+
+    # 3. 遍历场景中的所有其他agent
+    for other_token in all_agents_in_scene:
+        if other_token == key_agent_token:
+            continue
+
+        other_traj = full_trajectories.get((scene_token, other_token))
+        if other_traj is None or frame_idx >= len(other_traj):
+            continue
+
+        other_pos = other_traj[frame_idx]
+
+        # 4. 条件1：检查空间距离
+        distance = np.linalg.norm(key_pos - other_pos)
+        if distance >= proximity_thresh:
+            continue  # 太远了，跳过
+
+        # 5. 条件2：检查是否在关键agent的前方视野内 (可选但推荐)
+        is_in_front = True
+        if key_heading_vec is not None:
+            vec_to_other = other_pos - key_pos
+            # 防止静止的other agent导致零向量
+            if np.linalg.norm(vec_to_other) > 1e-4:
+                cos_angle = np.dot(key_heading_vec, vec_to_other) / (
+                            np.linalg.norm(key_heading_vec) * np.linalg.norm(vec_to_other))
+                angle_deg = np.arccos(np.clip(cos_angle, -1.0, 1.0)) * 180 / np.pi
+                if angle_deg > (heading_thresh_deg / 2):
+                    is_in_front = False
+
+        if is_in_front:
+            interacting_agents.append(other_token)
+
+    return interacting_agents
 
 def calculate_ade(pred, gt):
     """计算平均位移误差 (ADE)"""
@@ -141,11 +199,21 @@ def main():
 
     print(f"Finished prediction for all {len(all_predictions)} unique trajectories.")
 
-    # --- 第二步：按你的新逻辑处理，找到每个 agent 的最差预测点 ---
+    # 提前构建一个场景到所有agents的映射，避免在循环中重复查找，提高效率
+    scene_to_agents_map = defaultdict(list)
+    for scene_token, instance_token in full_dataset.full_trajectories.keys():
+        scene_to_agents_map[scene_token].append(instance_token)
+    print("Built scene-to-agents map.")
+
+    # --- 第二步：识别关键事件并寻找交互对象 ---
     critical_event_index = defaultdict(list)
     n_context = CONFIG['critical_event_context_frames']
     fde_threshold = CONFIG['critical_event_threshold_fde']
     spike_threshold = CONFIG['critical_event_threshold_spike']
+
+    # 从CONFIG获取交互参数
+    proximity_thresh = CONFIG['interaction_proximity_threshold']
+    heading_thresh_deg = CONFIG['interaction_heading_threshold_deg']
 
     for (scene_token, instance_token), agent_predictions in tqdm(all_predictions.items(),
                                                                  desc="Finding critical events"):
@@ -158,6 +226,43 @@ def main():
         # 用于存储该 agent 已经识别出的事件中心帧，避免重复添加
         processed_event_frames = set()
 
+        # 定义一个内部函数来处理事件的添加和交互分析，避免代码重复
+        def process_and_add_event(event_data):
+            center_frame = event_data["peak_fde_frame_in_traj"]
+            if center_frame in processed_event_frames:
+                return  # 避免重复处理
+
+            full_traj_len = full_dataset.full_trajectories.get((scene_token, instance_token), np.array([])).shape[0]
+            if full_traj_len == 0:
+                return
+
+            start_frame = max(0, center_frame - n_context)
+            end_frame = min(full_traj_len, center_frame + n_context)
+
+            if end_frame - start_frame <= (n_context / 2):
+                return
+
+            event_data["start_frame"] = start_frame
+            event_data["end_frame"] = end_frame
+
+            ### 核心交互分析部分 ###
+            interactions_per_frame = {}
+            all_agents_in_scene = scene_to_agents_map[scene_token]
+            for frame_idx in range(start_frame, end_frame):
+                interacting_tokens = find_interacting_agents(
+                    key_agent_token=instance_token,
+                    scene_token=scene_token,
+                    frame_idx=frame_idx,
+                    full_trajectories=full_dataset.full_trajectories,
+                    all_agents_in_scene=all_agents_in_scene,
+                    proximity_thresh=proximity_thresh,
+                    heading_thresh_deg=heading_thresh_deg
+                )
+                if interacting_tokens:  # 只记录有交互对象的帧
+                    interactions_per_frame[frame_idx] = interacting_tokens
+            event_data["interactions"] = interactions_per_frame
+            critical_event_index[scene_token].append(event_data)
+            processed_event_frames.add(center_frame)
         # --- 策略一：峰值误差法 (你原来的逻辑) ---
         # 找到 FDE 最大的那个预测点
         peak_fde_event = max(agent_predictions, key=lambda item: item[1])
@@ -165,25 +270,13 @@ def main():
 
         if max_fde > fde_threshold:
             event_center_frame = peak_fde_frame + CONFIG['history_len']
-
-            # 检查是否已处理过
-            if event_center_frame not in processed_event_frames:
-                # 添加到索引
-                full_traj_len = full_dataset.full_trajectories.get((scene_token, instance_token), np.array([])).shape[0]
-                if full_traj_len > 0:
-                    start_frame = max(0, event_center_frame - n_context)
-                    end_frame = min(full_traj_len, event_center_frame + n_context)
-
-                    if end_frame - start_frame > (n_context / 2):
-                        critical_event_index[scene_token].append({
-                            "reason": "peak_fde",  # 标明原因
-                            "instance_token": instance_token,
-                            "start_frame": start_frame,
-                            "end_frame": end_frame,
-                            "peak_fde_frame_in_traj": event_center_frame,
-                            "value": round(max_fde, 2)  # 记录峰值FDE
-                        })
-                        processed_event_frames.add(event_center_frame)
+            event_info = {
+                "reason": "peak_fde",
+                "instance_token": instance_token,
+                "peak_fde_frame_in_traj": event_center_frame,
+                "value": round(max_fde, 2)
+            }
+            process_and_add_event(event_info)
 
         # --- 策略二：误差突增法 (新逻辑) ---
         if len(agent_predictions) > 1:
@@ -207,44 +300,26 @@ def main():
 
             if max_spike > spike_threshold:
                 event_center_frame = spike_event_frame + CONFIG['history_len']
-
-                # 检查是否已处理过
-                if event_center_frame not in processed_event_frames:
-                    # 添加到索引
-                    full_traj_len = \
-                    full_dataset.full_trajectories.get((scene_token, instance_token), np.array([])).shape[0]
-                    if full_traj_len > 0:
-                        start_frame = max(0, event_center_frame - n_context)
-                        end_frame = min(full_traj_len, event_center_frame + n_context)
-
-                        if end_frame - start_frame > (n_context / 2):
-                            critical_event_index[scene_token].append({
-                                "reason": "fde_spike",  # 标明原因
-                                "instance_token": instance_token,
-                                "start_frame": start_frame,
-                                "end_frame": end_frame,
-                                "peak_fde_frame_in_traj": event_center_frame,
-                                "value": round(max_spike, 2),  # 记录spike值
-                                "fde_at_spike": round(fde_at_spike, 2)  # 记录spike发生时的FDE
-                            })
-                            processed_event_frames.add(event_center_frame)
+                event_info = {
+                    "reason": "fde_spike",
+                    "instance_token": instance_token,
+                    "peak_fde_frame_in_traj": event_center_frame,
+                    "value": round(max_spike, 2),
+                    "fde_at_spike": round(fde_at_spike, 2)
+                }
+                process_and_add_event(event_info)
 
         # --- 第三步：保存索引文件 (这部分不变) ---
         # ... (保存 JSON 文件的代码保持不变) ...
         # ... (打印统计信息的代码保持不变) ...
 
         # 打印更详细的统计信息
-    peak_count = 0
-    spike_count = 0
-    for scene, events in critical_event_index.items():
-        for event in events:
-            if event['reason'] == 'peak_fde':
-                peak_count += 1
-            elif event['reason'] == 'fde_spike':
-                spike_count += 1
     output_path = CONFIG['critical_event_index_file']
     with open(output_path, 'w') as f:
         json.dump(critical_event_index, f, indent=4)
+
+    print(f"\n--- Critical Event Index Generation Finished ---")
+    print(f"Index saved to: {output_path}")
 
     print(f"\n--- Critical Event Index Generation Finished ---")
     print(f"Index saved to: {CONFIG['critical_event_index_file']}")
