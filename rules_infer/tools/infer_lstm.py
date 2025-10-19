@@ -14,7 +14,7 @@ from rules_infer.tools.motion_lstm import Encoder, Decoder, Seq2Seq
 CONFIG = {
     # --- 数据和模型路径 ---
     'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! 修改这里 !!!
-    'version': 'v1.0-mini',  # 建议先用 'v1.0-mini' 测试，然后换成 'v1.0-trainval'
+    'version': 'v1.0-trainval',  # 建议先用 'v1.0-mini' 测试，然后换成 'v1.0-trainval'
     'model_path': 'nuscenes-lstm-model.pt',  # 你保存的模型权重文件
     'output_dir': 'eval_results',  # 保存可视化结果的文件夹
 
