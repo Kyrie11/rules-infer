@@ -118,7 +118,7 @@
       }
     },
     "A.2": {
-      "name": "Lateral Control",
+        "name": "Lateral Control",
       "description": "Rules governing the vehicle's side-to-side motion.",
       "children": {
         "A.2.1": {
