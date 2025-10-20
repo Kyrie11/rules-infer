@@ -3,10 +3,17 @@ import os
 import shutil
 from typing import List, Tuple
 
+import matplotlib
+
+# ### FIX 2: Force a non-interactive backend for headless servers ###
+# This line MUST be before the import of pyplot
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+
 import numpy as np
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud, RadarPointCloud, Box
+# ### FIX 1: Import BoxVisibility for the corrected function call ###
 from nuscenes.utils.geometry_utils import view_points, box_in_image, BoxVisibility
 from PIL import Image
 from pyquaternion import Quaternion
@@ -20,11 +27,11 @@ CONFIG = {
     'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! MUST MATCH your NuScenes path !!!
     'version': 'v1.0-trainval',  # <--- Use 'v1.0-mini' for quick testing
     'json_path': 'critical_events.json',  # Path to the input index file
-    'output_dir': 'critical_event_visualizations',  # Where to save the output images
+    'output_dir': '/data/senzeyu2/dataset/nuscenes/critical_event/',  # Where to save the output images
 
     # --- Visualization Settings ---
     'camera_channel': 'CAM_FRONT',
-    'plot_box': False,  # Set to True if you want to see agent bounding boxes
+    'render_boxes': True,  # Set to True to render 2D bounding boxes on agents
     'colors': {
         'gt_past': '#00B3FF',  # Blue
         'gt_future': '#00FF7F',  # Green
@@ -35,7 +42,7 @@ CONFIG = {
 
 
 # ==============================================================================
-# --- HELPER FUNCTIONS ---
+# --- HELPER FUNCTIONS (Unchanged) ---
 # ==============================================================================
 
 def get_full_trajectory(nusc: NuScenes, scene_token: str, instance_token: str) -> np.ndarray:
@@ -52,7 +59,6 @@ def get_full_trajectory(nusc: NuScenes, scene_token: str, instance_token: str) -
     while current_sample_token:
         sample = nusc.get('sample', current_sample_token)
 
-        # Find the annotation for our instance in this sample
         ann_tokens = sample['anns']
         found_ann = None
         for ann_token in ann_tokens:
@@ -62,7 +68,6 @@ def get_full_trajectory(nusc: NuScenes, scene_token: str, instance_token: str) -
                 break
 
         if found_ann:
-            # Append x, y coordinates
             traj.append(found_ann['translation'][:2])
 
         current_sample_token = sample['next']
@@ -83,40 +88,31 @@ def project_trajectory_to_image(
     if traj_global.shape[0] == 0:
         return np.array([]), np.array([])
 
-    # NuScenes data is 3D, our trajectories are 2D. Add a constant Z height.
-    # We use a small positive Z to ensure it's slightly above the ground plane.
     traj_3d_global = np.hstack([
         traj_global,
         np.ones((traj_global.shape[0], 1)) * 1.0
     ])
 
-    # Get camera calibration and pose
     cs_record = nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
     cam_intrinsic = np.array(cs_record['camera_intrinsic'])
 
-    # Get camera pose in global frame
     sensor_record = nusc.get('sample_data', cam_data['token'])
     pose_record = nusc.get('ego_pose', sensor_record['ego_pose_token'])
 
-    # Move points from global to ego-vehicle frame
     traj_3d_ego = traj_3d_global - np.array(pose_record['translation'])
     traj_3d_ego = np.dot(Quaternion(pose_record['rotation']).inverse.rotation_matrix, traj_3d_ego.T).T
 
-    # Move points from ego-vehicle frame to camera frame
     traj_3d_cam = traj_3d_ego - np.array(cs_record['translation'])
     traj_3d_cam = np.dot(Quaternion(cs_record['rotation']).inverse.rotation_matrix, traj_3d_cam.T).T
 
-    # Filter points that are behind the camera
     depth = traj_3d_cam[:, 2]
-    in_front_mask = depth > 0.1  # Keep points with positive depth
+    in_front_mask = depth > 0.1
 
     if not np.any(in_front_mask):
         return np.array([]), np.array([])
 
-    # Project to 2D image plane
     points_2d_cam = view_points(traj_3d_cam.T, cam_intrinsic, normalize=True)
 
-    # Keep only the valid points
     points_2d_cam = points_2d_cam[:2, in_front_mask].T
     depth_valid = depth[in_front_mask]
 
@@ -124,7 +120,7 @@ def project_trajectory_to_image(
 
 
 # ==============================================================================
-# --- CORE VISUALIZATION FUNCTION ---
+# --- CORE VISUALIZATION FUNCTION (Corrected) ---
 # ==============================================================================
 
 def visualize_critical_event_clip(
@@ -145,12 +141,12 @@ def visualize_critical_event_clip(
     value = event_data['value']
     pred_traj_global = np.array(event_data['predicted_trajectory'])
 
-    # 2. Create a unique, descriptive output folder for this event
+    # 2. Create output folder
     folder_name = f"event_{event_idx:02d}_{key_agent_token[:8]}_{reason}"
     event_output_dir = os.path.join(base_output_dir, nusc.get('scene', scene_token)['name'], folder_name)
     os.makedirs(event_output_dir, exist_ok=True)
 
-    # 3. Get all sample tokens for the scene once
+    # 3. Get all sample tokens for the scene
     scene_record = nusc.get('scene', scene_token)
     sample_tokens = []
     current_token = scene_record['first_sample_token']
@@ -158,15 +154,12 @@ def visualize_critical_event_clip(
         sample_tokens.append(current_token)
         sample = nusc.get('sample', current_token)
         current_token = sample['next']
-
-    # Ensure end_frame is within bounds
     end_frame = min(end_frame, len(sample_tokens))
 
-    # 4. Get full ground truth trajectories for all relevant agents
+    # 4. Get full ground truth trajectories
     trajectories_gt = {}
     trajectories_gt[key_agent_token] = get_full_trajectory(nusc, scene_token, key_agent_token)
 
-    # Collect all unique interacting agent tokens
     interacting_agents = set()
     for frame_interactions in event_data.get('interactions', {}).values():
         for token in frame_interactions:
@@ -176,7 +169,7 @@ def visualize_critical_event_clip(
         if agent_token not in trajectories_gt:
             trajectories_gt[agent_token] = get_full_trajectory(nusc, scene_token, agent_token)
 
-    # 5. Loop through each frame in the event window and generate an image
+    # 5. Loop through frames and generate images
     for frame_idx in range(start_frame, end_frame):
         sample_token = sample_tokens[frame_idx]
         sample = nusc.get('sample', sample_token)
@@ -185,21 +178,26 @@ def visualize_critical_event_clip(
 
         fig, ax = plt.subplots(1, 1, figsize=(16, 9))
 
-        # Render the camera image as the background
-        nusc.render_sample_data(cam_token, with_category=True, with_anns=CONFIG['plot_box'], ax=ax)
+        # ### FIX 1: Corrected the function call to render the background image ###
+        # Replaced `with_category=True` with `box_vis_level=BoxVisibility.ANY`
+        # and renamed config option `plot_box` to `render_boxes` for clarity.
+        nusc.render_sample_data(
+            cam_token,
+            with_anns=CONFIG['render_boxes'],
+            box_vis_level=BoxVisibility.ANY,  # This renders boxes with their category names
+            ax=ax
+        )
 
         # --- Plot Key Agent Trajectories ---
         key_gt_traj = trajectories_gt.get(key_agent_token, np.array([]))
         if key_gt_traj.shape[0] > 0:
-            # Ground Truth Past (relative to current frame)
             gt_past = key_gt_traj[:frame_idx + 1]
             points_2d, _ = project_trajectory_to_image(gt_past, cam_data, nusc)
             if points_2d.shape[0] > 1:
                 ax.plot(points_2d[:, 0], points_2d[:, 1], color=CONFIG['colors']['gt_past'], linewidth=3,
                         label='GT Past')
-                ax.scatter(points_2d[-1, 0], points_2d[-1, 1], color=CONFIG['colors']['gt_past'], s=80)
+                ax.scatter(points_2d[-1, 0], points_2d[-1, 1], color=CONFIG['colors']['gt_past'], s=80, zorder=5)
 
-            # Ground Truth Future (relative to current frame)
             gt_future = key_gt_traj[frame_idx:]
             points_2d, _ = project_trajectory_to_image(gt_future, cam_data, nusc)
             if points_2d.shape[0] > 1:
@@ -207,7 +205,6 @@ def visualize_critical_event_clip(
                         linestyle='--', label='GT Future')
 
         # --- Plot Predicted Trajectory ---
-        # Note: The prediction is static for the whole clip, showing what the model thought would happen
         points_2d, _ = project_trajectory_to_image(pred_traj_global, cam_data, nusc)
         if points_2d.shape[0] > 1:
             ax.plot(points_2d[:, 0], points_2d[:, 1], color=CONFIG['colors']['prediction'], linewidth=3, linestyle='-.',
@@ -218,7 +215,6 @@ def visualize_critical_event_clip(
         for agent_token in current_interactions:
             inter_gt_traj = trajectories_gt.get(agent_token, np.array([]))
             if inter_gt_traj.shape[0] > 0:
-                # We plot the full trajectory of interacting agents for context
                 points_2d, _ = project_trajectory_to_image(inter_gt_traj, cam_data, nusc)
                 if points_2d.shape[0] > 1:
                     ax.plot(points_2d[:, 0], points_2d[:, 1], color=CONFIG['colors']['interaction'], linewidth=2,
@@ -234,17 +230,18 @@ def visualize_critical_event_clip(
                 bbox=dict(facecolor='black', alpha=0.5))
         ax.legend(loc='upper right')
         ax.set_xlim(0, cam_data['width'])
-        ax.set_ylim(cam_data['height'], 0)  # Invert Y axis for images
+        ax.set_ylim(cam_data['height'], 0)
         ax.axis('off')
 
-        # Save the figure
+        # Save the figure to a file
         output_path = os.path.join(event_output_dir, f"frame_{frame_idx:04d}.png")
         plt.savefig(output_path, bbox_inches='tight', pad_inches=0)
+        # Close the figure to free memory and prevent it from being displayed
         plt.close(fig)
 
 
 # ==============================================================================
-# --- MAIN EXECUTION ---
+# --- MAIN EXECUTION (Unchanged) ---
 # ==============================================================================
 
 def main():
@@ -269,7 +266,7 @@ def main():
         shutil.rmtree(CONFIG['output_dir'])
     os.makedirs(CONFIG['output_dir'])
 
-    # 4. Iterate through scenes and events and generate visualizations
+    # 4. Iterate and visualize
     pbar_scenes = tqdm(critical_events.items(), desc="Processing Scenes")
     for scene_token, events_in_scene in pbar_scenes:
         scene_name = nusc.get('scene', scene_token)['name']
@@ -285,6 +282,7 @@ def main():
                     base_output_dir=CONFIG['output_dir']
                 )
             except Exception as e:
+                # This will now catch other potential errors, not just the previous ones
                 print(f"\n[ERROR] Failed to process event {event_idx} in scene {scene_name}: {e}")
 
     print("\n--- Visualization Complete ---")
