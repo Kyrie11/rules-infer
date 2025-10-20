@@ -27,7 +27,7 @@ CONFIG = {
     'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! MUST MATCH your NuScenes path !!!
     'version': 'v1.0-trainval',  # <--- Use 'v1.0-mini' for quick testing
     'json_path': 'critical_events.json',  # Path to the input index file
-    'output_dir': '/data/senzeyu2/dataset/nuscenes/critical_event/',  # Where to save the output images
+    'output_dir': '/data0/senzeyu2/dataset/nuscenes/critical_event/',  # Where to save the output images
 
     # --- Visualization Settings ---
     'camera_channel': 'CAM_FRONT',
