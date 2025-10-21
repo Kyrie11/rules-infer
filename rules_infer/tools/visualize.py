@@ -1,293 +1,200 @@
+import torch
 import json
-import os
-import shutil
-from typing import List, Tuple
-
-import matplotlib
-
-# ### FIX 2: Force a non-interactive backend for headless servers ###
-# This line MUST be before the import of pyplot
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-
-import numpy as np
-from nuscenes.nuscenes import NuScenes
-from nuscenes.utils.data_classes import LidarPointCloud, RadarPointCloud, Box
-# ### FIX 1: Import BoxVisibility for the corrected function call ###
-from nuscenes.utils.geometry_utils import view_points, box_in_image, BoxVisibility
-from PIL import Image
-from pyquaternion import Quaternion
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import os
+import numpy as np
+import cv2
+from PIL import Image
 
-# ==============================================================================
-# --- CONFIGURATION ---
-# ==============================================================================
+from nuscenes.nuscenes import NuScenes
+from nuscenes.utils.data_classes import Box
+from nuscenes.utils.geometry_utils import view_points, box_in_image, BoxVisibility
+from pyquaternion import Quaternion
+
+# --- 配置 ---
 CONFIG = {
-    # --- Paths ---
-    'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! MUST MATCH your NuScenes path !!!
-    'version': 'v1.0-trainval',  # <--- Use 'v1.0-mini' for quick testing
-    'json_path': 'critical_events.json',  # Path to the input index file
-    'output_dir': '/data0/senzeyu2/dataset/nuscenes/critical_event/',  # Where to save the output images
+    'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! 确认路径 !!!
+    'version': 'v1.0-trainval',  # <--- !!! 确认版本 !!!
+    'critical_event_index_file': 'critical_events.json',
+    'visualization_output_dir': '/data0/senzeyu2/dataset/nuscenes/critical_event',  # 新的输出目录
 
-    # --- Visualization Settings ---
-    'camera_channel': 'CAM_FRONT',
-    'render_boxes': True,  # Set to True to render 2D bounding boxes on agents
-    'colors': {
-        'gt_past': '#00B3FF',  # Blue
-        'gt_future': '#00FF7F',  # Green
-        'prediction': '#FF4D4D',  # Red
-        'interaction': '#FFC700'  # Yellow
-    }
+    'history_len': 8,
+    'future_len': 12,
+
+    # --- 标注颜色 (B, G, R) ---
+    'color_key_agent_box': (0, 0, 255),  # 红色
+    'color_interaction_agent_box': (255, 0, 0),  # 蓝色
+    'color_gt_trajectory': (0, 0, 255),  # 红色
+    'color_pred_trajectory': (0, 255, 0),  # 绿色
+
+    # --- 网格布局参数 ---
+    'grid_scale': 0.5,  # 将每个摄像头图像缩小的比例
+    'grid_layout': [
+        ['CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT'],
+        ['CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT']
+    ]
 }
 
 
-# ==============================================================================
-# --- HELPER FUNCTIONS (Unchanged) ---
-# ==============================================================================
-
-def get_full_trajectory(nusc: NuScenes, scene_token: str, instance_token: str) -> np.ndarray:
-    """
-    Extracts the full 2D (x, y) trajectory for a given agent in a given scene.
-    This is a simplified version of what your dataset class might do.
-    """
-    scene = nusc.get('scene', scene_token)
-    first_sample_token = scene['first_sample_token']
-
-    traj = []
-
-    current_sample_token = first_sample_token
-    while current_sample_token:
-        sample = nusc.get('sample', current_sample_token)
-
-        ann_tokens = sample['anns']
-        found_ann = None
-        for ann_token in ann_tokens:
-            ann = nusc.get('sample_annotation', ann_token)
-            if ann['instance_token'] == instance_token:
-                found_ann = ann
-                break
-
-        if found_ann:
-            traj.append(found_ann['translation'][:2])
-
-        current_sample_token = sample['next']
-        if not current_sample_token:
-            break
-
-    return np.array(traj)
-
-
-def project_trajectory_to_image(
-        traj_global: np.ndarray,
-        cam_data: dict,
-        nusc: NuScenes
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Projects a 3D global trajectory onto the 2D image plane of a given camera.
-    """
-    if traj_global.shape[0] == 0:
-        return np.array([]), np.array([])
-
-    traj_3d_global = np.hstack([
-        traj_global,
-        np.ones((traj_global.shape[0], 1)) * 1.0
-    ])
-
+# (这里可以复用之前脚本中的 project_trajectory_to_image 函数)
+def project_trajectory_to_image(nusc, trajectory_world, camera_token):
+    # ... 此函数代码与上一个回答中完全相同 ...
+    cam_data = nusc.get('sample_data', camera_token)
     cs_record = nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
-    cam_intrinsic = np.array(cs_record['camera_intrinsic'])
+    pose_record = nusc.get('ego_pose', cam_data['ego_pose_token'])
+    points_ego = trajectory_world - np.array(pose_record['translation'])
+    points_ego = np.dot(Quaternion(pose_record['rotation']).inverse.rotation_matrix, points_ego.T).T
+    points_sensor = points_ego - np.array(cs_record['translation'])
+    points_sensor = np.dot(Quaternion(cs_record['rotation']).inverse.rotation_matrix, points_sensor.T).T
+    points_img = view_points(points_sensor.T, np.array(cs_record['camera_intrinsic']), normalize=True)
+    projected_points = []
+    for i in range(points_sensor.shape[0]):
+        if points_sensor[i, 2] > 0.1:
+            if 0 <= points_img[0, i] < cam_data['width'] and 0 <= points_img[1, i] < cam_data['height']:
+                projected_points.append(points_img[:2, i].astype(int))
+    return projected_points
 
-    sensor_record = nusc.get('sample_data', cam_data['token'])
-    pose_record = nusc.get('ego_pose', sensor_record['ego_pose_token'])
-
-    traj_3d_ego = traj_3d_global - np.array(pose_record['translation'])
-    traj_3d_ego = np.dot(Quaternion(pose_record['rotation']).inverse.rotation_matrix, traj_3d_ego.T).T
-
-    traj_3d_cam = traj_3d_ego - np.array(cs_record['translation'])
-    traj_3d_cam = np.dot(Quaternion(cs_record['rotation']).inverse.rotation_matrix, traj_3d_cam.T).T
-
-    depth = traj_3d_cam[:, 2]
-    in_front_mask = depth > 0.1
-
-    if not np.any(in_front_mask):
-        return np.array([]), np.array([])
-
-    points_2d_cam = view_points(traj_3d_cam.T, cam_intrinsic, normalize=True)
-
-    points_2d_cam = points_2d_cam[:2, in_front_mask].T
-    depth_valid = depth[in_front_mask]
-
-    return points_2d_cam, depth_valid
-
-
-# ==============================================================================
-# --- CORE VISUALIZATION FUNCTION (Corrected) ---
-# ==============================================================================
-
-def visualize_critical_event_clip(
-        nusc: NuScenes,
-        scene_token: str,
-        event_data: dict,
-        event_idx: int,
-        base_output_dir: str
-):
-    """
-    Generates and saves a sequence of images for a single critical event.
-    """
-    # 1. Parse event data
-    key_agent_token = event_data['instance_token']
-    start_frame = event_data['start_frame']
-    end_frame = event_data['end_frame']
-    reason = event_data['reason']
-    value = event_data['value']
-    pred_traj_global = np.array(event_data['predicted_trajectory'])
-
-    # 2. Create output folder
-    folder_name = f"event_{event_idx:02d}_{key_agent_token[:8]}_{reason}"
-    event_output_dir = os.path.join(base_output_dir, nusc.get('scene', scene_token)['name'], folder_name)
-    os.makedirs(event_output_dir, exist_ok=True)
-
-    # 3. Get all sample tokens for the scene
-    scene_record = nusc.get('scene', scene_token)
-    sample_tokens = []
-    current_token = scene_record['first_sample_token']
-    while current_token:
-        sample_tokens.append(current_token)
-        sample = nusc.get('sample', current_token)
-        current_token = sample['next']
-    end_frame = min(end_frame, len(sample_tokens))
-
-    # 4. Get full ground truth trajectories
-    trajectories_gt = {}
-    trajectories_gt[key_agent_token] = get_full_trajectory(nusc, scene_token, key_agent_token)
-
-    interacting_agents = set()
-    for frame_interactions in event_data.get('interactions', {}).values():
-        for token in frame_interactions:
-            interacting_agents.add(token)
-
-    for agent_token in interacting_agents:
-        if agent_token not in trajectories_gt:
-            trajectories_gt[agent_token] = get_full_trajectory(nusc, scene_token, agent_token)
-
-    # 5. Loop through frames and generate images
-    for frame_idx in range(start_frame, end_frame):
-        sample_token = sample_tokens[frame_idx]
-        sample = nusc.get('sample', sample_token)
-        cam_token = sample['data'][CONFIG['camera_channel']]
-        cam_data = nusc.get('sample_data', cam_token)
-
-        fig, ax = plt.subplots(1, 1, figsize=(16, 9))
-
-        # ### FIX 1: Corrected the function call to render the background image ###
-        # Replaced `with_category=True` with `box_vis_level=BoxVisibility.ANY`
-        # and renamed config option `plot_box` to `render_boxes` for clarity.
-        nusc.render_sample_data(
-            cam_token,
-            with_anns=CONFIG['render_boxes'],
-            box_vis_level=BoxVisibility.ANY,  # This renders boxes with their category names
-            ax=ax
-        )
-
-        # --- Plot Key Agent Trajectories ---
-        key_gt_traj = trajectories_gt.get(key_agent_token, np.array([]))
-        if key_gt_traj.shape[0] > 0:
-            gt_past = key_gt_traj[:frame_idx + 1]
-            points_2d, _ = project_trajectory_to_image(gt_past, cam_data, nusc)
-            if points_2d.shape[0] > 1:
-                ax.plot(points_2d[:, 0], points_2d[:, 1], color=CONFIG['colors']['gt_past'], linewidth=3,
-                        label='GT Past')
-                ax.scatter(points_2d[-1, 0], points_2d[-1, 1], color=CONFIG['colors']['gt_past'], s=80, zorder=5)
-
-            gt_future = key_gt_traj[frame_idx:]
-            points_2d, _ = project_trajectory_to_image(gt_future, cam_data, nusc)
-            if points_2d.shape[0] > 1:
-                ax.plot(points_2d[:, 0], points_2d[:, 1], color=CONFIG['colors']['gt_future'], linewidth=3,
-                        linestyle='--', label='GT Future')
-
-        # --- Plot Predicted Trajectory ---
-        points_2d, _ = project_trajectory_to_image(pred_traj_global, cam_data, nusc)
-        if points_2d.shape[0] > 1:
-            ax.plot(points_2d[:, 0], points_2d[:, 1], color=CONFIG['colors']['prediction'], linewidth=3, linestyle='-.',
-                    label='Prediction')
-
-        # --- Plot Interacting Agents' Trajectories ---
-        current_interactions = event_data.get('interactions', {}).get(str(frame_idx), [])
-        for agent_token in current_interactions:
-            inter_gt_traj = trajectories_gt.get(agent_token, np.array([]))
-            if inter_gt_traj.shape[0] > 0:
-                points_2d, _ = project_trajectory_to_image(inter_gt_traj, cam_data, nusc)
-                if points_2d.shape[0] > 1:
-                    ax.plot(points_2d[:, 0], points_2d[:, 1], color=CONFIG['colors']['interaction'], linewidth=2,
-                            alpha=0.7, label='Interacting Agent' if agent_token == current_interactions[0] else None)
-
-        # --- Add Text Overlay and Final Touches ---
-        info_text = (
-            f"Scene: {nusc.get('scene', scene_token)['name']}\n"
-            f"Frame: {frame_idx} / {len(sample_tokens) - 1}\n"
-            f"Reason: {reason.upper()} ({value:.2f})"
-        )
-        ax.text(10, 50, info_text, fontsize=12, color='white',
-                bbox=dict(facecolor='black', alpha=0.5))
-        ax.legend(loc='upper right')
-        ax.set_xlim(0, cam_data['width'])
-        ax.set_ylim(cam_data['height'], 0)
-        ax.axis('off')
-
-        # Save the figure to a file
-        output_path = os.path.join(event_output_dir, f"frame_{frame_idx:04d}.png")
-        plt.savefig(output_path, bbox_inches='tight', pad_inches=0)
-        # Close the figure to free memory and prevent it from being displayed
-        plt.close(fig)
-
-
-# ==============================================================================
-# --- MAIN EXECUTION (Unchanged) ---
-# ==============================================================================
 
 def main():
-    print("--- Starting Critical Event Visualization ---")
-
-    # 1. Load NuScenes dataset
-    print(f"Loading NuScenes {CONFIG['version']} from {CONFIG['dataroot']}...")
+    print("Initializing NuScenes...")
     nusc = NuScenes(version=CONFIG['version'], dataroot=CONFIG['dataroot'], verbose=False)
 
-    # 2. Load the critical events JSON file
-    if not os.path.exists(CONFIG['json_path']):
-        print(f"Error: Critical event file not found at '{CONFIG['json_path']}'")
-        return
-    with open(CONFIG['json_path'], 'r') as f:
+    print(f"Loading critical events from {CONFIG['critical_event_index_file']}...")
+    with open(CONFIG['critical_event_index_file'], 'r') as f:
         critical_events = json.load(f)
-    print(
-        f"Loaded {sum(len(v) for v in critical_events.values())} critical events across {len(critical_events)} scenes.")
 
-    # 3. Setup output directory
-    if os.path.exists(CONFIG['output_dir']):
-        print(f"Output directory '{CONFIG['output_dir']}' already exists. Removing it.")
-        shutil.rmtree(CONFIG['output_dir'])
-    os.makedirs(CONFIG['output_dir'])
+    os.makedirs(CONFIG['visualization_output_dir'], exist_ok=True)
+    total_events = sum(len(events) for events in critical_events.values())
+    print(f"Found {len(critical_events)} scenes with a total of {total_events} events. Starting grid visualization...")
+    event_progress = tqdm(total=total_events, desc="Processing Events")
 
-    # 4. Iterate and visualize
-    pbar_scenes = tqdm(critical_events.items(), desc="Processing Scenes")
-    for scene_token, events_in_scene in pbar_scenes:
-        scene_name = nusc.get('scene', scene_token)['name']
-        pbar_scenes.set_description(f"Processing Scene: {scene_name}")
+    # 获取单个摄像头的尺寸用于创建网格
+    any_scene = nusc.scene[0]
+    any_sample = nusc.get('sample', any_scene['first_sample_token'])
+    any_cam_token = any_sample['data']['CAM_FRONT']
+    cam_data = nusc.get('sample_data', any_cam_token)
+    cam_h, cam_w = cam_data['height'], cam_data['width']
 
-        for event_idx, event_data in enumerate(events_in_scene):
-            try:
-                visualize_critical_event_clip(
-                    nusc=nusc,
-                    scene_token=scene_token,
-                    event_data=event_data,
-                    event_idx=event_idx,
-                    base_output_dir=CONFIG['output_dir']
-                )
-            except Exception as e:
-                # This will now catch other potential errors, not just the previous ones
-                print(f"\n[ERROR] Failed to process event {event_idx} in scene {scene_name}: {e}")
+    scaled_h, scaled_w = int(cam_h * CONFIG['grid_scale']), int(cam_w * CONFIG['grid_scale'])
+    grid_h, grid_w = scaled_h * 2, scaled_w * 3  # 2行3列
 
-    print("\n--- Visualization Complete ---")
-    print(f"Results saved in: {os.path.abspath(CONFIG['output_dir'])}")
+    for scene_token, events in critical_events.items():
+        scene = nusc.get('scene', scene_token)
+        frame_idx_to_sample_token = {}
+        current_sample_token = scene['first_sample_token']
+        for i in range(scene['nbr_samples']):
+            frame_idx_to_sample_token[i] = current_sample_token
+            sample = nusc.get('sample', current_sample_token)
+            current_sample_token = sample['next']
+            if not current_sample_token: break
+
+        for event_idx, event in enumerate(events):
+            key_agent_token = event['instance_token']
+            start_frame, end_frame = event['start_frame'], event['end_frame']
+
+            event_folder_name = f"scene_{scene['name']}_event_{event_idx}_{event['reason']}"
+            event_output_path = os.path.join(CONFIG['visualization_output_dir'], event_folder_name)
+            os.makedirs(event_output_path, exist_ok=True)
+
+            # --- 准备轨迹数据 (与之前相同) ---
+            pred_future_world = np.array(event['predicted_trajectory'])
+            pred_anchor_frame = event['peak_fde_frame_in_traj'] - 1
+            gt_future_world = []
+            instance_record = nusc.get('instance', key_agent_token)
+            ann_token = instance_record['first_annotation_token']
+            current_frame_idx = 0
+            while ann_token:
+                ann = nusc.get('sample_annotation', ann_token)
+                if current_frame_idx >= pred_anchor_frame and len(gt_future_world) < (CONFIG['future_len'] + 1):
+                    gt_future_world.append(ann['translation'][:2])
+                ann_token = ann['next']
+                current_frame_idx += 1
+                if not ann_token: break
+            gt_future_world = np.array(gt_future_world)
+
+            # 补全Z轴坐标
+            z_coord = nusc.get('sample_annotation', instance_record['first_annotation_token'])['translation'][2]
+
+            # 对齐轨迹
+            if len(gt_future_world) > 0:
+                history_end_pos_gt = gt_future_world[0:1]
+                pred_traj_to_draw = pred_future_world + (history_end_pos_gt - pred_future_world[0:1])
+            else:  # 如果找不到GT轨迹，就使用预测轨迹的原点
+                pred_traj_to_draw = pred_future_world
+
+            gt_traj_3d = np.hstack([gt_future_world, np.full((gt_future_world.shape[0], 1), z_coord)])
+            pred_traj_3d = np.hstack([pred_traj_to_draw, np.full((pred_traj_to_draw.shape[0], 1), z_coord)])
+
+            for frame_idx in range(start_frame, end_frame):
+                sample_token = frame_idx_to_sample_token.get(frame_idx)
+                if not sample_token: continue
+
+                # 创建一个黑色的大画布来拼接所有摄像头图像
+                grid_image = np.zeros((grid_h, grid_w, 3), dtype=np.uint8)
+
+                interacting_tokens = event.get('interactions', {}).get(str(frame_idx), [])
+                sample_anns = nusc.get('sample', sample_token)['anns']
+
+                for row_idx, row in enumerate(CONFIG['grid_layout']):
+                    for col_idx, cam_name in enumerate(row):
+                        camera_token = nusc.get('sample', sample_token)['data'][cam_name]
+
+                        # --- 1. 获取原始图像 ---
+                        img_path, _, cam_intrinsic = nusc.get_sample_data(camera_token,
+                                                                          box_vis_level=BoxVisibility.NONE)
+                        image = cv2.imread(img_path)
+                        if image is None: continue
+
+                        # --- 2. 在单个图像上渲染包围盒 ---
+                        for ann_token in sample_anns:
+                            ann = nusc.get('sample_annotation', ann_token)
+                            if ann['instance_token'] != key_agent_token and ann[
+                                'instance_token'] not in interacting_tokens:
+                                continue  # 只渲染关键和交互agent
+
+                            box = nusc.get_box(ann_token)
+                            color = None
+                            if ann['instance_token'] == key_agent_token:
+                                color = CONFIG['color_key_agent_box']
+                            elif ann['instance_token'] in interacting_tokens:
+                                color = CONFIG['color_interaction_agent_box']
+
+                            if color:
+                                box.render_cv2(image, view=cam_intrinsic, normalize=True, colors=(color, color, color))
+
+                        # --- 3. 在单个图像上渲染轨迹 ---
+                        gt_points_2d = project_trajectory_to_image(nusc, gt_traj_3d, camera_token)
+                        pred_points_2d = project_trajectory_to_image(nusc, pred_traj_3d, camera_token)
+                        for i in range(len(gt_points_2d) - 1):
+                            cv2.line(image, tuple(gt_points_2d[i]), tuple(gt_points_2d[i + 1]),
+                                     CONFIG['color_gt_trajectory'], 2)
+                        for i in range(len(pred_points_2d) - 1):
+                            cv2.line(image, tuple(pred_points_2d[i]), tuple(pred_points_2d[i + 1]),
+                                     CONFIG['color_pred_trajectory'], 2)
+
+                        # --- 4. 缩放并粘贴到大画布上 ---
+                        resized_image = cv2.resize(image, (scaled_w, scaled_h))
+
+                        # 添加摄像头名称标签
+                        cv2.putText(resized_image, cam_name, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2,
+                                    cv2.LINE_AA)
+
+                        y_offset = row_idx * scaled_h
+                        x_offset = col_idx * scaled_w
+                        grid_image[y_offset:y_offset + scaled_h, x_offset:x_offset + scaled_w] = resized_image
+
+                # 保存最终的网格图像
+                output_filename = os.path.join(event_output_path, f"grid_frame_{frame_idx:03d}.jpg")
+                cv2.imwrite(output_filename, grid_image)
+
+            event_progress.update(1)
+
+    event_progress.close()
+    print("\nGrid visualization finished!")
+    print(f"Results saved to: {CONFIG['visualization_output_dir']}")
 
 
 if __name__ == '__main__':
     main()
+
