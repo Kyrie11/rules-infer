@@ -17,7 +17,7 @@ CONFIG = {
     'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! 确认路径 !!!
     'version': 'v1.0-trainval',  # <--- !!! 确认版本 !!!
     'critical_event_index_file': 'critical_events.json',
-    'visualization_output_dir': 'critical_event_visualizations_grid',  # 新的输出目录
+    'visualization_output_dir': '/data0/senzeyu2/dataset/nuscenes/critical_event',  # 新的输出目录
 
     'history_len': 8,
     'future_len': 12,
