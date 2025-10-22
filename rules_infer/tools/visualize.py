@@ -10,7 +10,7 @@ CONFIG = {
     'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! 确保这里的路径正确 !!!
     'version': 'v1.0-trainval',  # <--- !!! 确保版本与生成json时一致 !!!
     'critical_event_index_file': 'critical_events.json',
-    'output_image_dir': 'event_images',  # 保存拼接图片的根文件夹
+    'output_image_dir': '/data0/senzeyu2/dataset/nuscenes/critical',  # 保存拼接图片的根文件夹
 }
 
 # --- 颜色定义 (BGR格式，因为OpenCV使用BGR) ---
