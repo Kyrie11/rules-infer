@@ -11,10 +11,10 @@ from nuscenes.utils.geometry_utils import view_points, BoxVisibility
 # --- Configuration ---
 # Adjust these paths and settings to match your environment
 CONFIG = {
-    'dataroot': '/data/sets/nuscenes',  # <--- !!! UPDATE THIS PATH !!!
+    'dataroot': '/data0/senzeyu2/dataset/nuscenes',  # <--- !!! UPDATE THIS PATH !!!
     'version': 'v1.0-trainval',  # Or 'v1.0-mini' if you're testing
     'critical_event_index_file': 'critical_events.json',  # Input JSON file
-    'visualization_output_dir': 'critical_event_visualizations_grid',  # Output folder
+    'visualization_output_dir': '/data0/senzeyu2/dataset/nuscenes/critical',  # Output folder
 
     # --- Trajectory Lengths (Must match the data generation script) ---
     'future_len': 12,
