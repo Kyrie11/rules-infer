@@ -67,7 +67,6 @@ def get_annotation_for_instance(nusc: NuScenes, sample_token: str, instance_toke
 def main():
     print("Initializing NuScenes API...")
     nusc = NuScenes(version=CONFIG['version'], dataroot=CONFIG['dataroot'], verbose=False)
-    nusc_explorer = NuScenesExplorer(nusc)  ### NEW ###: Instantiate the explorer
 
     print(f"Loading critical events from '{CONFIG['event_file']}'...")
     try:
@@ -122,26 +121,21 @@ def main():
                     sample = nusc.get('sample', sample_token)
                     cam_data_token = sample['data'][cam_name]
 
-                    ### --- CHANGED BLOCK START --- ###
-                    # 1. 使用 explorer 渲染摄像头图像作为背景
-                    #    `with_anns=False` 表示不绘制任何默认的标注框
-                    nusc_explorer.render_sample_data(cam_data_token, with_anns=False, ax=ax)
-                    ax.set_title(cam_name)  # render_sample_data 会清除标题，所以在这里重新设置
+                    # 使用render_sample_data方法直接渲染图像
+                    nusc.render_sample_data(cam_data_token, with_anns=False, ax=ax)
+                    ax.set_title(cam_name)
 
-                    # 2. 渲染主角的包围框 (红色)
+                    # 渲染主角的包围框 (红色)
                     key_agent_ann_token = get_annotation_for_instance(nusc, sample_token, instance_token)
                     if key_agent_ann_token:
-                        # 使用 explorer.render_annotation，它接受 ax 参数
-                        nusc_explorer.render_annotation(key_agent_ann_token, ax=ax, color='red', linewidth=3)
+                        # 使用 render_annotation 方法渲染
+                        nusc.render_annotation(key_agent_ann_token, ax=ax, color='red', linewidth=3)
 
-                    # 3. 渲染交互对象的包围框 (蓝色)
+                    # 渲染交互对象的包围框 (蓝色)
                     for inter_token in interacting_tokens:
                         inter_ann_token = get_annotation_for_instance(nusc, sample_token, inter_token)
                         if inter_ann_token:
-                            nusc_explorer.render_annotation(inter_ann_token, ax=ax, color='blue', linewidth=2)
-
-                    # explorer.render_sample_data 已经关闭了坐标轴，所以不需要 ax.axis('off')
-                    ### --- CHANGED BLOCK END --- ###
+                            nusc.render_annotation(inter_ann_token, ax=ax, color='blue', linewidth=2)
 
                 fig.suptitle(f"Scene: {scene_name} | Frame: {frame_idx}\nKey Agent (RED): {instance_token[:8]}",
                              fontsize=16)
