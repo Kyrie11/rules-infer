@@ -1,14 +1,12 @@
 import json
 import os
 import matplotlib.pyplot as plt
-import numpy as np
 from PIL import Image
 from tqdm import tqdm
 
 # 确保 nuscenes-devkit 已安装
 from nuscenes.nuscenes import NuScenes
-from nuscenes.utils.data_classes import Box
-from pyquaternion import Quaternion
+from nuscenes.explorer import NuScenesExplorer  ### NEW ###: Import the correct class for visualization
 
 # ----------------------------------
 # 1. 配置
@@ -17,7 +15,7 @@ CONFIG = {
     'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! 确保这是你的NuScenes数据根目录
     'version': 'v1.0-trainval',  # <--- !!! 确保这与生成JSON时使用的版本一致
     'event_file': 'critical_events.json',  # 输入的JSON事件文件
-    'output_dir': '/data0/senzeyu2/dataset/nuscenes/events',  # 保存可视化结果的总文件夹
+    'output_dir': 'critical_event_visualizations',  # 保存可视化结果的总文件夹
 }
 
 # ----------------------------------
@@ -69,6 +67,7 @@ def get_annotation_for_instance(nusc: NuScenes, sample_token: str, instance_toke
 def main():
     print("Initializing NuScenes API...")
     nusc = NuScenes(version=CONFIG['version'], dataroot=CONFIG['dataroot'], verbose=False)
+    nusc_explorer = NuScenesExplorer(nusc)  ### NEW ###: Instantiate the explorer
 
     print(f"Loading critical events from '{CONFIG['event_file']}'...")
     try:
@@ -79,17 +78,14 @@ def main():
         print("Please make sure you have run the event detection script first and the file is in the correct location.")
         return
 
-    # 创建主输出目录
     os.makedirs(CONFIG['output_dir'], exist_ok=True)
     print(f"Visualizations will be saved to '{CONFIG['output_dir']}'")
 
-    # 定义6个摄像头的顺序和布局
     cam_order = [
         'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT',
         'CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT'
     ]
 
-    # 使用tqdm来显示总体进度
     total_events = sum(len(events) for events in critical_events_by_scene.values())
     event_pbar = tqdm(total=total_events, desc="Processing Events")
 
@@ -101,18 +97,15 @@ def main():
             instance_token = event['instance_token']
             start_frame = event['start_frame']
             end_frame = event['end_frame']
-            interactions = event['interactions']  # 这是一个字典，键是帧号的字符串
-            reason = event.get('reason', 'event')  # 获取事件原因用于命名
+            interactions = event['interactions']
+            reason = event.get('reason', 'event')
 
-            # 创建当前事件的输出文件夹
             event_folder_name = f"scene-{scene_name}_agent-{instance_token[:8]}_{reason}_{i}"
             event_output_path = os.path.join(CONFIG['output_dir'], event_folder_name)
             os.makedirs(event_output_path, exist_ok=True)
 
-            # 在事件级别更新进度条的描述
             event_pbar.set_description(f"Event: {event_folder_name}")
 
-            # 遍历该事件的每一帧
             for frame_idx in range(start_frame, end_frame):
                 try:
                     sample_token = get_sample_token_by_frame(nusc, scene_token, frame_idx)
@@ -120,46 +113,45 @@ def main():
                     print(f"Warning: Skipping frame. {e}")
                     continue
 
-                # 获取当前帧的交互对象列表
                 interacting_tokens = interactions.get(str(frame_idx), [])
 
-                # 创建3x2的图像画布
                 fig, axes = plt.subplots(2, 3, figsize=(24, 12))
-                axes = axes.ravel()  # 将2x3的数组展平为1D数组，方便遍历
+                axes = axes.ravel()
 
-                # 遍历6个摄像头
                 for ax, cam_name in zip(axes, cam_order):
-                    cam_data = nusc.get('sample_data', nusc.get('sample', sample_token)['data'][cam_name])
+                    sample = nusc.get('sample', sample_token)
+                    cam_data_token = sample['data'][cam_name]
 
-                    # 1. 渲染摄像头图像作为背景
-                    image_path = os.path.join(nusc.dataroot, cam_data['filename'])
-                    im = Image.open(image_path)
-                    ax.imshow(im)
+                    ### --- CHANGED BLOCK START --- ###
+                    # 1. 使用 explorer 渲染摄像头图像作为背景
+                    #    `with_anns=False` 表示不绘制任何默认的标注框
+                    nusc_explorer.render_sample_data(cam_data_token, with_anns=False, ax=ax)
+                    ax.set_title(cam_name)  # render_sample_data 会清除标题，所以在这里重新设置
 
                     # 2. 渲染主角的包围框 (红色)
                     key_agent_ann_token = get_annotation_for_instance(nusc, sample_token, instance_token)
                     if key_agent_ann_token:
-                        nusc.render_annotation(key_agent_ann_token, out_path=None, ax=ax, box_color='red', lw=3)
+                        # 使用 explorer.render_annotation，它接受 ax 参数
+                        nusc_explorer.render_annotation(key_agent_ann_token, ax=ax, color='red', linewidth=3)
 
                     # 3. 渲染交互对象的包围框 (蓝色)
                     for inter_token in interacting_tokens:
                         inter_ann_token = get_annotation_for_instance(nusc, sample_token, inter_token)
                         if inter_ann_token:
-                            nusc.render_annotation(inter_ann_token, out_path=None, ax=ax, box_color='blue', lw=2)
+                            nusc_explorer.render_annotation(inter_ann_token, ax=ax, color='blue', linewidth=2)
 
-                    ax.set_title(cam_name)
-                    ax.axis('off')  # 关闭坐标轴
+                    # explorer.render_sample_data 已经关闭了坐标轴，所以不需要 ax.axis('off')
+                    ### --- CHANGED BLOCK END --- ###
 
                 fig.suptitle(f"Scene: {scene_name} | Frame: {frame_idx}\nKey Agent (RED): {instance_token[:8]}",
                              fontsize=16)
-                plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # 调整布局以适应主标题
+                plt.tight_layout(rect=[0, 0.03, 1, 0.95])
 
-                # 保存拼接好的图像
                 output_image_path = os.path.join(event_output_path, f"frame_{frame_idx:04d}.png")
                 plt.savefig(output_image_path)
                 plt.close(fig)
 
-            event_pbar.update(1)  # 每处理完一个事件，更新一次进度条
+            event_pbar.update(1)
 
     event_pbar.close()
     print("\nVisualization process finished successfully.")
