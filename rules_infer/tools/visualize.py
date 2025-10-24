@@ -1,8 +1,13 @@
+import matplotlib
+matplotlib.use('Agg')  # <-- 在导入 pyplot 之前添加这一行
+
 import json
 import os
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from PIL import Image
+# ... a lot of other imports
+
 from typing import List, Tuple
 
 # 确保 nuscenes-devkit 已安装
