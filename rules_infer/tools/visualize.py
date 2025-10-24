@@ -15,7 +15,7 @@ CONFIG = {
     'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! 确保这是你的NuScenes数据根目录
     'version': 'v1.0-trainval',  # <--- !!! 确保这与生成JSON时使用的版本一致
     'json_path': 'critical_events.json',  # <--- 输入的JSON文件
-    'output_dir': 'critical_event_visuals'  # <--- 保存可视化结果的根文件夹
+    'output_dir': '/data0/senzeyu2/dataset/nuscenes/critical'  # <--- 保存可视化结果的根文件夹
 }
 
 # 定义颜色
