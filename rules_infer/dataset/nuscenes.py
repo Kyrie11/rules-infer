@@ -1,113 +1,81 @@
+# dataset.py (Updated)
+
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
-from nuscenes.map_expansion.map_api import NuScenesMap
-from tqdm import tqdm
-import numpy as np
+from torch.utils.data import Dataset
 from nuscenes.nuscenes import NuScenes
+import numpy as np
+from tqdm import tqdm
 
 
-
-
-# ----------------------------------
-# 2. 数据集加载 (Dataset Loading)
-# ----------------------------------
 class NuScenesTrajectoryDataset(Dataset):
-    def __init__(self, nusc, config):
+    def __init__(self, nusc, hist_len=8, pred_len=12, split='v1.0-trainval'):
         self.nusc = nusc
-        self.config = config
-        print("Loading NuScenes maps...")
-        self.maps = {
-            location: NuScenesMap(dataroot=self.config['dataroot'], map_name=location)
-            for location in [
-                'singapore-hollandvillage', 'singapore-queenstown',
-                'boston-seaport', 'singapore-onenorth'
-            ]
-        }
-        print("Maps loaded successfully.")
-        self.sequences = self._load_data()
+        self.hist_len = hist_len
+        self.pred_len = pred_len
+        self.seq_len = hist_len + pred_len
+        self.samples = []
+        self._prepare_data(split)
 
-    def _get_traffic_light_features(self, agent_pos, map_api):
-        is_near_tl, dist_to_tl = 0.0, 1.0
-        records = map_api.get_records_in_radius(agent_pos[0], agent_pos[1], 50, ['traffic_light'])
-        tl_tokens = records.get('traffic_light')
-        if not tl_tokens:
-            return np.array([is_near_tl, dist_to_tl], dtype=np.float32)
+    def _prepare_data(self, split):
+        print("Preparing data samples (including vehicles and humans)...")
+        scene_splits = self._get_scene_splits(split)
 
-        min_dist = float('inf')
-        for tl_token in tl_tokens:
-            tl_record = map_api.get('traffic_light', tl_token)
-            if not tl_record or 'polygon_token' not in tl_record: continue
-            polygon = map_api.extract_polygon(tl_record['polygon_token'])
-            center_point = np.mean(polygon.exterior.xy, axis=1)
-            dist = np.linalg.norm(agent_pos - center_point)
-            if dist < min_dist: min_dist = dist
+        for scene in tqdm(self.nusc.scene):
+            if scene['name'] not in scene_splits:
+                continue
 
-        if min_dist < self.config['traffic_light_distance_threshold']:
-            is_near_tl = 1.0
-        dist_to_tl = min(min_dist, self.config['traffic_light_distance_threshold']) / self.config[
-            'traffic_light_distance_threshold']
-        return np.array([is_near_tl, dist_to_tl], dtype=np.float32)
+            first_sample_token = scene['first_sample_token']
+            sample_tokens = self._get_sample_tokens_in_scene(first_sample_token)
+            instance_trajectories = self._get_instance_trajectories(sample_tokens)
 
-    def _load_data(self):
-        all_sequences = []
-        for scene in tqdm(self.nusc.scene, desc="Processing Scenes for Dataset"):
-            log_record = self.nusc.get('log', scene['log_token'])
-            location = log_record['location']
-            map_api = self.maps[location]
+            for instance_token, trajectory in instance_trajectories.items():
+                if len(trajectory) >= self.seq_len:
+                    for i in range(len(trajectory) - self.seq_len + 1):
+                        self.samples.append(trajectory[i: i + self.seq_len])
 
-            sample_token = scene['first_sample_token']
-            while sample_token:
-                sample = self.nusc.get('sample', sample_token)
-                for ann_token in sample['anns']:
-                    ann = self.nusc.get('sample_annotation', ann_token)
-                    # 只处理车辆
-                    if 'vehicle' not in ann['category_name']: continue
+    def _get_scene_splits(self, split_name):
+        from nuscenes.utils.splits import create_splits_scenes
+        splits = create_splits_scenes()
+        return splits[split_name]
 
-                    # 检查是否有足够的历史和未来
-                    has_history = ann['prev'] != ''
-                    has_future = ann['next'] != ''
-                    if not (has_history and has_future): continue
+    def _get_sample_tokens_in_scene(self, first_token):
+        tokens = []
+        current_token = first_token
+        while current_token != "":
+            tokens.append(current_token)
+            sample = self.nusc.get('sample', current_token)
+            current_token = sample['next']
+        return tokens
 
-                    # 提取完整的轨迹片段
-                    total_len = self.config['history_len'] + self.config['future_len']
-                    trajectory = []
+    def _get_instance_trajectories(self, sample_tokens):
+        trajectories = {}
+        for token in sample_tokens:
+            sample = self.nusc.get('sample', token)
+            for ann_token in sample['anns']:
+                ann = self.nusc.get('sample_annotation', ann_token)
 
-                    # 提取历史
-                    current_ann = ann
-                    for _ in range(self.config['history_len']):
-                        pos = current_ann['translation']
-                        agent_pos_2d = np.array([pos[0], pos[1]])
-                        tl_features = self._get_traffic_light_features(agent_pos_2d, map_api)
-                        feature_vector = np.concatenate([agent_pos_2d, tl_features])
-                        trajectory.insert(0, feature_vector)
-                        if current_ann['prev'] == '': break
-                        current_ann = self.nusc.get('sample_annotation', current_ann['prev'])
+                # --- MODIFICATION START ---
+                # 检查类别是否为车辆或行人
+                is_vehicle = ann['category_name'].startswith('vehicle')
+                is_human = ann['category_name'].startswith('human')
 
-                    # 提取未来
-                    current_ann = ann
-                    for _ in range(self.config['future_len']):
-                        if current_ann['next'] == '': break
-                        current_ann = self.nusc.get('sample_annotation', current_ann['next'])
-                        pos = current_ann['translation']
-                        agent_pos_2d = np.array([pos[0], pos[1]])
-                        tl_features = self._get_traffic_light_features(agent_pos_2d, map_api)
-                        feature_vector = np.concatenate([agent_pos_2d, tl_features])
-                        trajectory.append(feature_vector)
-
-                    if len(trajectory) == total_len:
-                        hist = np.array(trajectory[:self.config['history_len']], dtype=np.float32)
-                        future = np.array([t[:2] for t in trajectory[self.config['history_len']:]], dtype=np.float32)
-                        all_sequences.append((hist, future))
-
-                sample_token = sample['next']
-
-        print(f"Finished processing. Found {len(all_sequences)} samples.")
-        return all_sequences
+                if is_vehicle or is_human:
+                    # --- MODIFICATION END ---
+                    instance_token = ann['instance_token']
+                    if instance_token not in trajectories:
+                        trajectories[instance_token] = []
+                    trajectories[instance_token].append(ann['translation'][:2])  # (x, y)
+        return trajectories
 
     def __len__(self):
-        return len(self.sequences)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        history, future = self.sequences[idx]
-        return torch.from_numpy(history), torch.from_numpy(future)
+        full_trajectory = np.array(self.samples[idx], dtype=np.float32)
+        history = full_trajectory[:self.hist_len]
+        future = full_trajectory[self.hist_len:]
+        origin = history[-1].copy()
+        history -= origin
+        future -= origin
 
+        return torch.from_numpy(history), torch.from_numpy(future)
