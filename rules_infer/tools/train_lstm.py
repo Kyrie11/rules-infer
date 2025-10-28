@@ -8,7 +8,7 @@ from tqdm import tqdm
 from rules_infer.dataset.nuscenes import NuScenesTrajectoryDataset
 from rules_infer.tools.motion_lstm import *
 
-NUSCENES_PATH = '/data0/senzeyu2/dataset/nuscenes'  # 修改为你的nuscenes数据集路径
+NUSCENES_PATH = '/data0/senzeyu2/dataset/nuscenes/'  # 修改为你的nuscenes数据集路径
 NUSCENES_VERSION = 'v1.0-trainval'  # 使用mini版本进行快速测试，或 'v1.0-trainval' 进行完整训练
 MODEL_SAVE_PATH = 'trajectory_lstm.pth'
 
