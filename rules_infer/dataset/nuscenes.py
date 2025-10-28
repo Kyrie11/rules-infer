@@ -11,132 +11,103 @@ from nuscenes.nuscenes import NuScenes
 # ----------------------------------
 # 2. 数据集加载 (Dataset Loading)
 # ----------------------------------
-class NuScenesTrajectoryDataset(Dataset): # ... (代码与之前完全相同，为简洁省略)
-    # 在 NuScenesTrajectoryDataset 类中
+class NuScenesTrajectoryDataset(Dataset):
     def __init__(self, nusc, config):
         self.nusc = nusc
         self.config = config
-        print("Loading NuScenes maps using location names...")
-
-        ### MODIFICATION START ###
-        # 创建一个从 log_token 到 location 的映射
-        log_token_to_location = {log['token']: log['location'] for log in self.nusc.log}
-
-        self.maps = {}
-        # 遍历 nuscenes 的地图记录
-        for map_record in self.nusc.map:
-            # 地图记录中包含了它所关联的所有 log_tokens
-            log_tokens = map_record['log_tokens']
-
-            # 假设同一张地图文件（如 boston-seaport）的所有 log 都共享同一个 location
-            # 我们取第一个 log_token 来查找 location
-            if not log_tokens:
-                continue
-
-            first_log_token = log_tokens[0]
-            location = log_token_to_location.get(first_log_token)
-
-            if location is None:
-                print(f"Warning: Could not find location for map record: {map_record['token']}")
-                continue
-
-            # 检查 location (即 map_name) 是否已经加载
-            if location not in self.maps:
-                # 使用 location 作为 map_name 来加载地图
-                # NuScenesMap 内部会自动处理文件路径
-                try:
-                    print(f"  - Loading map for location: {location}")
-                    self.maps[location] = NuScenesMap(
-                        dataroot=self.config['dataroot'],
-                        map_name=location
-                    )
-                except Exception as e:
-                    print(f"  - Failed to load map {location}: {e}")
-
-        ### MODIFICATION END ###
-
-        if not self.maps:
-            raise RuntimeError("Failed to load any maps. Please check your NuScenes installation and dataroot.")
-
+        print("Loading NuScenes maps...")
+        self.maps = {
+            location: NuScenesMap(dataroot=self.config['dataroot'], map_name=location)
+            for location in [
+                'singapore-hollandvillage', 'singapore-queenstown',
+                'boston-seaport', 'singapore-onenorth'
+            ]
+        }
         print("Maps loaded successfully.")
+        self.sequences = self._load_data()
 
-        self.sequences, self.full_trajectories = self._load_data()
-
-    # 在 NuScenesTrajectoryDataset 类中
     def _get_traffic_light_features(self, agent_pos, map_api):
-        """
-        计算给定agent位置的交通灯特征 (修正版)
-        """
-        is_near_tl = 0.0
-        dist_to_tl = 1.0  # 归一化距离, 1.0 表示很远
-
-        # get_records_in_radius 返回一个字典, key是图层名
-        # 我们只关心 'traffic_light' 图层
+        is_near_tl, dist_to_tl = 0.0, 1.0
         records = map_api.get_records_in_radius(agent_pos[0], agent_pos[1], 50, ['traffic_light'])
-
-        ### MODIFICATION START ###
-        # 正确检查返回的记录
         tl_tokens = records.get('traffic_light')
         if not tl_tokens:
             return np.array([is_near_tl, dist_to_tl], dtype=np.float32)
 
         min_dist = float('inf')
-        # 正确遍历 token 列表
         for tl_token in tl_tokens:
-            # 使用 get 方法，并传入正确的图层名和 token
             tl_record = map_api.get('traffic_light', tl_token)
-            if not tl_record or 'polygon_token' not in tl_record:
-                continue
-
+            if not tl_record or 'polygon_token' not in tl_record: continue
             polygon = map_api.extract_polygon(tl_record['polygon_token'])
-
-            # 使用简化的中心点距离作为特征
             center_point = np.mean(polygon.exterior.xy, axis=1)
             dist = np.linalg.norm(agent_pos - center_point)
-            if dist < min_dist:
-                min_dist = dist
-        ### MODIFICATION END ###
+            if dist < min_dist: min_dist = dist
 
         if min_dist < self.config['traffic_light_distance_threshold']:
             is_near_tl = 1.0
-
         dist_to_tl = min(min_dist, self.config['traffic_light_distance_threshold']) / self.config[
             'traffic_light_distance_threshold']
-
         return np.array([is_near_tl, dist_to_tl], dtype=np.float32)
 
     def _load_data(self):
-        all_sequences, full_trajectories = [], {}
-        for scene in tqdm(self.nusc.scene, desc="Processing Scenes"):
+        all_sequences = []
+        for scene in tqdm(self.nusc.scene, desc="Processing Scenes for Dataset"):
             log_record = self.nusc.get('log', scene['log_token'])
             location = log_record['location']
             map_api = self.maps[location]
 
-            first_sample_token = scene['first_sample_token']
-            sample = self.nusc.get('sample', first_sample_token)
+            sample_token = scene['first_sample_token']
+            while sample_token:
+                sample = self.nusc.get('sample', sample_token)
+                for ann_token in sample['anns']:
+                    ann = self.nusc.get('sample_annotation', ann_token)
+                    # 只处理车辆
+                    if 'vehicle' not in ann['category_name']: continue
 
-            instance_tokens = {self.nusc.get('sample_annotation', ann_token)['instance_token'] for ann_token in sample['anns']}
-            for instance_token in instance_tokens:
-                trajectory = []; current_sample_token = first_sample_token
-                while current_sample_token:
-                    sample_record = self.nusc.get('sample', current_sample_token); instance_ann = None
-                    for ann_token in sample_record['anns']:
-                        ann = self.nusc.get('sample_annotation', ann_token)
-                        if ann['instance_token'] == instance_token: instance_ann = ann; break
-                    if instance_ann:
-                        pos = instance_ann['translation']; agent_pos_2d = np.array([pos[0], pos[1]]); tl_features = self._get_traffic_light_features(agent_pos_2d, map_api); feature_vector = np.concatenate([agent_pos_2d, tl_features]); trajectory.append(feature_vector)
-                    current_sample_token = sample_record['next']
-                if len(trajectory) > 0: full_trajectories[(scene['token'], instance_token)] = np.array(trajectory, dtype=np.float32)
-                total_len = self.config['history_len'] + self.config['future_len']
-                if len(trajectory) >= total_len:
-                    for i in range(len(trajectory) - total_len + 1):
-                        hist = np.array(trajectory[i : i + self.config['history_len']], dtype=np.float32)
-                        future = np.array([t[:2] for t in trajectory[i + self.config['history_len'] : i + total_len]], dtype=np.float32)
-                        metadata = {"scene_token": scene['token'], "instance_token": instance_token, "start_index_in_full_traj": i, "full_traj_len": len(trajectory)}
-                        all_sequences.append((hist, future, metadata))
+                    # 检查是否有足够的历史和未来
+                    has_history = ann['prev'] != ''
+                    has_future = ann['next'] != ''
+                    if not (has_history and has_future): continue
+
+                    # 提取完整的轨迹片段
+                    total_len = self.config['history_len'] + self.config['future_len']
+                    trajectory = []
+
+                    # 提取历史
+                    current_ann = ann
+                    for _ in range(self.config['history_len']):
+                        pos = current_ann['translation']
+                        agent_pos_2d = np.array([pos[0], pos[1]])
+                        tl_features = self._get_traffic_light_features(agent_pos_2d, map_api)
+                        feature_vector = np.concatenate([agent_pos_2d, tl_features])
+                        trajectory.insert(0, feature_vector)
+                        if current_ann['prev'] == '': break
+                        current_ann = self.nusc.get('sample_annotation', current_ann['prev'])
+
+                    # 提取未来
+                    current_ann = ann
+                    for _ in range(self.config['future_len']):
+                        if current_ann['next'] == '': break
+                        current_ann = self.nusc.get('sample_annotation', current_ann['next'])
+                        pos = current_ann['translation']
+                        agent_pos_2d = np.array([pos[0], pos[1]])
+                        tl_features = self._get_traffic_light_features(agent_pos_2d, map_api)
+                        feature_vector = np.concatenate([agent_pos_2d, tl_features])
+                        trajectory.append(feature_vector)
+
+                    if len(trajectory) == total_len:
+                        hist = np.array(trajectory[:self.config['history_len']], dtype=np.float32)
+                        future = np.array([t[:2] for t in trajectory[self.config['history_len']:]], dtype=np.float32)
+                        all_sequences.append((hist, future))
+
+                sample_token = sample['next']
+
         print(f"Finished processing. Found {len(all_sequences)} samples.")
-        return all_sequences, full_trajectories
-    def __len__(self): return len(self.sequences)
+        return all_sequences
+
+    def __len__(self):
+        return len(self.sequences)
+
     def __getitem__(self, idx):
-        history, future, metadata = self.sequences[idx]
-        return torch.from_numpy(history), torch.from_numpy(future), metadata
+        history, future = self.sequences[idx]
+        return torch.from_numpy(history), torch.from_numpy(future)
+
