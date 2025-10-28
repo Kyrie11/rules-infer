@@ -6,34 +6,23 @@ import numpy as np
 import random
 
 class Encoder(nn.Module):
-    def __init__(self, input_dim, hidden_dim, n_layers):
+    def __init__(self, input_dim=2, hidden_dim=32, n_layers=2):
         super().__init__()
         self.lstm = nn.LSTM(input_dim, hidden_dim, n_layers, batch_first=True)
-
     def forward(self, src):
-        # src shape: [batch_size, hist_len, input_dim]
         outputs, (hidden, cell) = self.lstm(src)
-        # hidden shape: [n_layers, batch_size, hidden_dim]
-        # cell shape: [n_layers, batch_size, hidden_dim]
         return hidden, cell
 
-
 class Decoder(nn.Module):
-    def __init__(self, output_dim, hidden_dim, n_layers):
+    def __init__(self, output_dim=2, hidden_dim=32, n_layers=2):
         super().__init__()
         self.output_dim = output_dim
         self.lstm = nn.LSTM(output_dim, hidden_dim, n_layers, batch_first=True)
         self.fc_out = nn.Linear(hidden_dim, output_dim)
-
     def forward(self, input, hidden, cell):
-        # input shape: [batch_size, 1, output_dim]
-        # hidden, cell from encoder
         output, (hidden, cell) = self.lstm(input, (hidden, cell))
-        # output shape: [batch_size, 1, hidden_dim]
         prediction = self.fc_out(output)
-        # prediction shape: [batch_size, 1, output_dim]
         return prediction, hidden, cell
-
 
 class Seq2Seq(nn.Module):
     def __init__(self, encoder, decoder, device):
@@ -41,25 +30,14 @@ class Seq2Seq(nn.Module):
         self.encoder = encoder
         self.decoder = decoder
         self.device = device
-
-    def forward(self, src, trg, teacher_forcing_ratio=0.5):
-        # src: [batch_size, hist_len, input_dim]
-        # trg: [batch_size, future_len, output_dim]
+    def forward(self, src, future_len, teacher_forcing_ratio=0.0):
         batch_size = src.shape[0]
-        trg_len = trg.shape[1]
         trg_vocab_size = self.decoder.output_dim
-
-        outputs = torch.zeros(batch_size, trg_len, trg_vocab_size).to(self.device)
-
+        outputs = torch.zeros(batch_size, future_len, trg_vocab_size).to(self.device)
         hidden, cell = self.encoder(src)
-
-        # 使用历史轨迹的最后一个点作为解码器的第一个输入
-        input = src[:, -1, :self.decoder.output_dim].unsqueeze(1)
-
-        for t in range(trg_len):
+        input = src[:, -1, :].unsqueeze(1)
+        for t in range(future_len):
             output, hidden, cell = self.decoder(input, hidden, cell)
             outputs[:, t, :] = output.squeeze(1)
-
-            teacher_force = random.random() < teacher_forcing_ratio
-            input = trg[:, t, :].unsqueeze(1) if teacher_force else output
+            input = output
         return outputs

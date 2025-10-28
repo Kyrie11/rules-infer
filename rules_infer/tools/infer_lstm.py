@@ -50,300 +50,258 @@ CONFIG = {
 }
 
 
-def find_interacting_agents(key_agent_token, scene_token, frame_idx, full_trajectories, all_agents_in_scene,
-                            proximity_thresh, heading_thresh_deg):
-    """
-    在指定场景的某一帧中，寻找与关键agent有交互的其他agent。
-    """
-    interacting_agents = []
+def get_agent_history_and_future(instance_token, start_sample, nusc, hist_len, future_len):
+    history_xy, future_xy = np.zeros((hist_len, 2)), np.zeros((future_len, 2))
+    try:
+        current_ann = next(ann for ann in nusc.get('sample', start_sample)['anns'] if
+                           nusc.get('sample_annotation', ann)['instance_token'] == instance_token)
+    except StopIteration:
+        return None, None  # Instance not in this sample
 
-    # 1. 获取关键agent在当前帧的状态
-    key_traj = full_trajectories.get((scene_token, key_agent_token))
-    if key_traj is None or frame_idx >= len(key_traj):
-        return []
-    key_pos = key_traj[frame_idx]
+    # Get history
+    current_ann_record = nusc.get('sample_annotation', current_ann)
+    for i in range(hist_len - 1, -1, -1):
+        history_xy[i] = current_ann_record['translation'][:2]
+        if not current_ann_record['prev']: return None, None
+        current_ann_record = nusc.get('sample_annotation', current_ann_record['prev'])
 
-    # 2. 近似计算关键agent的朝向向量
-    key_heading_vec = None
-    if frame_idx > 0 and len(key_traj) > frame_idx: # <-- 增加 len 检查
-        prev_pos = key_traj[frame_idx - 1]
-        # 确保agent在移动，否则没有朝向
-        if np.linalg.norm(key_pos - prev_pos) > 0.1:
-            key_heading_vec = key_pos - prev_pos
-
-    # 3. 遍历场景中的所有其他agent
-    for other_token in all_agents_in_scene:
-        if other_token == key_agent_token:
-            continue
-
-        other_traj = full_trajectories.get((scene_token, other_token))
-        if other_traj is None or frame_idx >= len(other_traj):
-            continue
-
-        other_pos = other_traj[frame_idx]
-
-        # 4. 条件1：检查空间距离
-        distance = np.linalg.norm(key_pos - other_pos)
-        if distance >= proximity_thresh:
-            continue  # 太远了，跳过
-
-        # 5. 条件2：检查是否在关键agent的前方视野内 (可选但推荐)
-        is_in_front = True
-        if key_heading_vec is not None:
-            vec_to_other = other_pos - key_pos
-            # 防止静止的other agent导致零向量
-            if np.linalg.norm(vec_to_other) > 1e-4:
-                cos_angle = np.dot(key_heading_vec, vec_to_other) / (
-                            np.linalg.norm(key_heading_vec) * np.linalg.norm(vec_to_other))
-                angle_deg = np.arccos(np.clip(cos_angle, -1.0, 1.0)) * 180 / np.pi
-                if angle_deg > (heading_thresh_deg / 2):
-                    is_in_front = False
-
-        if is_in_front:
-            interacting_agents.append(other_token)
-
-    return interacting_agents
-
-def calculate_ade(pred, gt):
-    """计算平均位移误差 (ADE)"""
-    # pred/gt shape: [batch_size, future_len, 2]
-    error = torch.norm(pred - gt, p=2, dim=2)  # 计算每个时间点的欧氏距离
-    ade = torch.mean(error, dim=1)  # 在时间维度上求平均
-    return torch.mean(ade)  # 在 batch 维度上求平均
+    # Reset to start and get future
+    current_ann_record = nusc.get('sample_annotation', current_ann)
+    for i in range(future_len):
+        if not current_ann_record['next']: return None, None
+        current_ann_record = nusc.get('sample_annotation', current_ann_record['next'])
+        future_xy[i] = current_ann_record['translation'][:2]
+    return history_xy, future_xy
 
 
-def calculate_fde(pred, gt):
-    """计算最终位移误差 (FDE)"""
-    # pred/gt shape: [batch_size, future_len, 2]
-    error = torch.norm(pred[:, -1, :] - gt[:, -1, :], p=2, dim=1)  # 只计算最后一个时间点的欧氏距离
-    return torch.mean(error)  # 在 batch 维度上求平均
+def transform_to_agent_centric(points, anchor_xy, anchor_yaw):
+    rotation_matrix = np.array([[np.cos(anchor_yaw), -np.sin(anchor_yaw)], [np.sin(anchor_yaw), np.cos(anchor_yaw)]])
+    return (points - anchor_xy) @ rotation_matrix.T
 
 
-def visualize_prediction(history, gt_future, pred_future, save_path):
-    """可视化单个预测结果"""
-    history = history.cpu().numpy()
-    gt_future = gt_future.cpu().numpy()
-    pred_future = pred_future.cpu().numpy()
-
-    plt.figure(figsize=(8, 8))
-
-    # 绘制历史轨迹 (蓝色)
-    plt.plot(history[:, 0], history[:, 1], 'bo-', label='History')
-
-    # 绘制真实未来轨迹 (绿色)
-    plt.plot(gt_future[:, 0], gt_future[:, 1], 'go-', label='Ground Truth')
-
-    # 绘制预测未来轨迹 (红色)
-    plt.plot(pred_future[:, 0], pred_future[:, 1], 'rx--', label='Prediction')
-
-    plt.legend()
-    plt.title('Trajectory Prediction')
-    plt.xlabel('X (meters)')
-    plt.ylabel('Y (meters)')
-    plt.grid(True)
-    plt.axis('equal')
-    plt.savefig(save_path)
-    plt.close()
-
-def collate_fn_with_meta(batch):
-    histories = torch.stack([item[0] for item in batch]); futures = torch.stack([item[1] for item in batch]); metadata = [item[2] for item in batch]
-    return histories, futures, metadata
-
-# ----------------------------------
-# 5. 主评估函数
-# ----------------------------------
-def main():
-    print(f"Using device: {CONFIG['device']}")
-    nusc = NuScenes(version=CONFIG['version'], dataroot=CONFIG['dataroot'], verbose=False)
-    encoder = Encoder(CONFIG['input_dim'], CONFIG['hidden_dim'], CONFIG['n_layers'])
-    decoder = Decoder(CONFIG['output_dim'], CONFIG['hidden_dim'], CONFIG['n_layers'])
-    model = Seq2Seq(encoder, decoder, CONFIG['device']).to(CONFIG['device'])
-    model.load_state_dict(torch.load(CONFIG['model_path'], map_location=CONFIG['device']))
-    print(f"Model loaded from {CONFIG['model_path']}")
-    model.eval()
-    # 我们需要在整个数据集上挖掘，而不仅仅是验证集
-    # 如果数据集很大，可以考虑只用 val_dataset
-    full_dataset = NuScenesTrajectoryDataset(nusc, CONFIG)
-
-    # 使用整个数据集进行挖掘
-    data_loader = DataLoader(full_dataset, batch_size=CONFIG['batch_size'], shuffle=False, num_workers=4,
-                             collate_fn=collate_fn_with_meta)
-
-    # 加载模型
+def transform_to_global(points, anchor_xy, anchor_yaw):
+    rotation_matrix = np.array([[np.cos(anchor_yaw), -np.sin(anchor_yaw)], [np.sin(anchor_yaw), np.cos(anchor_yaw)]])
+    return points @ rotation_matrix + anchor_xy
 
 
-    ### NEW/MODIFIED ###
-    # 用于存储每个场景中每个 agent 的失败帧
-    # 结构: {scene_token: {instance_token: [(frame_index, fde_error), ...]}}
-    failure_points = defaultdict(lambda: defaultdict(list))
+def get_heading_from_history(history_xy):
+    if np.all(history_xy[-1] == history_xy[-2]): return 0.0
+    return np.arctan2(history_xy[-1, 1] - history_xy[-2, 1], history_xy[-1, 0] - history_xy[-2, 0])
 
 
-    all_predictions = defaultdict(list)
+class InteractionDetector:
+    def __init__(self, model, device, nusc, config):
+        self.model = model
+        self.device = device
+        self.nusc = nusc
+        self.config = config
+        self.model.eval()
 
-    with torch.no_grad():
-        for history, future, metadata in tqdm(data_loader, desc="Predicting and Calculating FDE"):
-            history, future = history.to(CONFIG['device']), future.to(CONFIG['device'])
-            output = model(history, future, 0)
+    def detect_events_in_scene(self, scene_token):
+        scene = self.nusc.get('scene', scene_token)
+        samples = []
+        current_token = scene['first_sample_token']
+        while current_token:
+            samples.append(current_token)
+            current_token = self.nusc.get('sample', current_token)['next']
 
-            # 计算每个样本的 FDE
-            fde_per_sample = torch.norm(output[:, -1, :] - future[:, -1, :], p=2, dim=1)
+        agent_event_tracker = {}
+        detected_events = []
 
-            for i in range(len(history)):
-                meta = metadata[i]
-                scene_token = meta["scene_token"]
-                instance_token = meta["instance_token"]
-                start_frame = meta["start_index_in_full_traj"]
-                fde_error = fde_per_sample[i].item()
+        for frame_idx, sample_token in enumerate(samples):
+            sample = self.nusc.get('sample', sample_token)
 
-                ### MODIFICATION START ###
-                # 模型输出已经是世界坐标，直接使用即可
-                pred_future_coords = output[i].cpu().numpy()
+            for ann_token in sample['anns']:
+                ann = self.nusc.get('sample_annotation', ann_token)
+                instance_token = ann['instance_token']
+                if 'vehicle' not in ann['category_name']: continue
 
-                # 记录每个预测点的起始帧和对应的FDE
-                all_predictions[(scene_token, instance_token)].append({
-                    "start_frame": start_frame,
-                    "fde_error": fde_error,
-                    "pred_trajectory": pred_future_coords.tolist()  # 保存为 list
-                })
-    print(f"Finished prediction for all {len(all_predictions)} unique trajectories.")
-
-    # 提前构建一个场景到所有agents的映射，避免在循环中重复查找，提高效率
-    scene_to_agents_map = defaultdict(list)
-    for scene_token, instance_token in full_dataset.full_trajectories.keys():
-        scene_to_agents_map[scene_token].append(instance_token)
-    print("Built scene-to-agents map.")
-
-    # --- 第二步：识别关键事件并寻找交互对象 ---
-    critical_event_index = defaultdict(list)
-    n_context = CONFIG['critical_event_context_frames']
-    fde_threshold = CONFIG['critical_event_threshold_fde']
-    spike_threshold = CONFIG['critical_event_threshold_spike']
-
-    # 从CONFIG获取交互参数
-    proximity_thresh = CONFIG['interaction_proximity_threshold']
-    heading_thresh_deg = CONFIG['interaction_heading_threshold_deg']
-
-    for (scene_token, instance_token), agent_predictions in tqdm(all_predictions.items(),
-                                                                 desc="Finding critical events"):
-        if not agent_predictions:
-            continue
-
-        # 关键一步：必须按帧号排序，才能正确计算误差变化率
-        agent_predictions.sort(key=lambda item: item["start_frame"])
-
-        # 用于存储该 agent 已经识别出的事件中心帧，避免重复添加
-        processed_event_frames = set()
-
-        # 定义一个内部函数来处理事件的添加和交互分析，避免代码重复
-        def process_and_add_event(event_data):
-            center_frame = event_data["peak_fde_frame_in_traj"]
-            if center_frame in processed_event_frames:
-                return  # 避免重复处理
-
-            full_traj_len = full_dataset.full_trajectories.get((scene_token, instance_token), np.array([])).shape[0]
-            if full_traj_len == 0:
-                return
-
-            start_frame = max(0, center_frame - n_context)
-            end_frame = min(full_traj_len, center_frame + n_context)
-
-            if end_frame - start_frame <= (n_context / 2):
-                return
-
-            event_data["start_frame"] = start_frame
-            event_data["end_frame"] = end_frame
-
-            ### 核心交互分析部分 ###
-            interactions_per_frame = {}
-            all_agents_in_scene = scene_to_agents_map[scene_token]
-            for frame_idx in range(start_frame, end_frame):
-                interacting_tokens = find_interacting_agents(
-                    key_agent_token=instance_token,
-                    scene_token=scene_token,
-                    frame_idx=frame_idx,
-                    full_trajectories=full_dataset.full_trajectories,
-                    all_agents_in_scene=all_agents_in_scene,
-                    proximity_thresh=proximity_thresh,
-                    heading_thresh_deg=heading_thresh_deg
+                history, future_gt = get_agent_history_and_future(
+                    instance_token, sample_token, self.nusc,
+                    self.config['hist_len'], self.config['future_len']
                 )
-                if interacting_tokens:  # 只记录有交互对象的帧
-                    interactions_per_frame[str(frame_idx)] = interacting_tokens
-            event_data["interactions"] = interactions_per_frame
-            critical_event_index[scene_token].append(event_data)
-            processed_event_frames.add(center_frame)
-        # --- 策略一：峰值误差法 (你原来的逻辑) ---
-            # --- 策略一：峰值误差法 (修正后) ---
-            if agent_predictions:
-                peak_fde_event = max(agent_predictions, key=lambda item: item["fde_error"])
-                peak_fde_frame = peak_fde_event["start_frame"]
-                max_fde = peak_fde_event["fde_error"]
-                pred_traj_for_peak = peak_fde_event["pred_trajectory"]
+                if history is None or future_gt is None: continue
 
-                if max_fde > fde_threshold:
-                    event_center_frame = peak_fde_frame + CONFIG['history_len']
-                    event_info = {
-                        "reason": "peak_fde", "instance_token": instance_token,
-                        "peak_fde_frame_in_traj": event_center_frame,
-                        "value": round(max_fde, 2), "predicted_trajectory": pred_traj_for_peak
-                    }
-                    process_and_add_event(event_info)
+                anchor_xy, anchor_yaw = history[-1], get_heading_from_history(history)
+                history_centric = transform_to_agent_centric(history, anchor_xy, anchor_yaw)
+                history_tensor = torch.FloatTensor(history_centric).unsqueeze(0).to(self.device)
 
-        # --- 策略二：误差突增法 (新逻辑) ---
-        if len(agent_predictions) > 1:
-            max_spike, spike_event_frame, fde_at_spike = 0, -1, 0
-            pred_traj_for_spike = None
+                with torch.no_grad():
+                    future_pred_centric = self.model(history_tensor, self.config['future_len']).squeeze(0).cpu().numpy()
 
-            # 遍历寻找最大的FDE增量
-            for i in range(1, len(agent_predictions)):
-                current_pred = agent_predictions[i]
-                prev_pred = agent_predictions[i - 1]
+                future_pred_global = transform_to_global(future_pred_centric, anchor_xy, anchor_yaw)
+                fde = np.linalg.norm(future_pred_global[-1] - future_gt[-1])
 
-                if current_pred["start_frame"] == prev_pred["start_frame"] + 1:
-                    spike = current_pred["fde_error"] - prev_pred["fde_error"]
-                    if spike > max_spike:
-                        max_spike = spike
-                        spike_event_frame = current_pred["start_frame"]
-                        fde_at_spike = current_pred["fde_error"]
-                        pred_traj_for_spike = current_pred["pred_trajectory"]
+                if instance_token not in agent_event_tracker:
+                    agent_event_tracker[instance_token] = {'is_event': False, 'start_frame_idx': -1, 'peak_error': 0,
+                                                           'peak_frame_idx': -1}
 
-            if max_spike > spike_threshold and spike_event_frame != -1:
-                event_center_frame = spike_event_frame + CONFIG['history_len']
-                event_info = {
-                    "reason": "fde_spike", "instance_token": instance_token,
-                    "peak_fde_frame_in_traj": event_center_frame,
-                    "value": round(max_spike, 2), "fde_at_spike": round(fde_at_spike, 2),
-                    "predicted_trajectory": pred_traj_for_spike
-                }
-                process_and_add_event(event_info)
+                tracker = agent_event_tracker[instance_token]
 
-        # --- 第三步：保存索引文件 (这部分不变) ---
-        # ... (保存 JSON 文件的代码保持不变) ...
-        # ... (打印统计信息的代码保持不变) ...
+                if fde > self.config['error_threshold_m']:
+                    if not tracker['is_event']:
+                        tracker.update({'is_event': True, 'start_frame_idx': frame_idx, 'peak_error': fde,
+                                        'peak_frame_idx': frame_idx})
+                    elif fde > tracker['peak_error']:
+                        tracker.update({'peak_error': fde, 'peak_frame_idx': frame_idx})
+                else:
+                    if tracker['is_event']:
+                        end_idx = frame_idx - 1
+                        if end_idx - tracker['start_frame_idx'] + 1 >= self.config['min_event_frames']:
+                            peak_sample_token = samples[tracker['peak_frame_idx']]
+                            interacting_agents = self._find_interacting_agents(instance_token, peak_sample_token)
+                            detected_events.append({
+                                'key_agent_token': instance_token,
+                                'interacting_agent_tokens': interacting_agents,
+                                'start_frame_idx': tracker['start_frame_idx'],
+                                'end_frame_idx': end_idx,
+                                'peak_error_fde': tracker['peak_error'],
+                                'peak_frame_idx': tracker['peak_frame_idx'],
+                                'peak_sample_token': peak_sample_token,  # <<<--- 添加此项用于可视化
+                                'scene_token': scene_token
+                            })
+                        tracker['is_event'] = False
+        return detected_events
 
-        # 打印更详细的统计信息
-    output_path = CONFIG['critical_event_index_file']
-    with open(output_path, 'w') as f:
-        json.dump(critical_event_index, f, indent=4)
+    def _find_interacting_agents(self, key_agent_token, peak_sample_token):
+        interacting_tokens = []
+        sample = self.nusc.get('sample', peak_sample_token)
+        key_agent_ann = next(ann for ann in sample['anns'] if
+                             self.nusc.get('sample_annotation', ann)['instance_token'] == key_agent_token)
+        key_agent_pos = np.array(self.nusc.get('sample_annotation', key_agent_ann)['translation'][:2])
 
-        # 打印更详细的统计信息
-    peak_count = 0
-    spike_count = 0
-    for scene, events in critical_event_index.items():
-        for event in events:
-            if event['reason'] == 'peak_fde':
-                peak_count += 1
-            elif event['reason'] == 'fde_spike':
-                spike_count += 1
-    print(f"Index saved to: {output_path}")
+        for ann_token in sample['anns']:
+            ann = self.nusc.get('sample_annotation', ann_token)
+            if ann['instance_token'] == key_agent_token: continue
+            distance = np.linalg.norm(key_agent_pos - np.array(ann['translation'][:2]))
+            if distance < self.config['proximity_radius_m']:
+                interacting_tokens.append(ann['instance_token'])
+        return interacting_tokens
 
-    print(f"\n--- Critical Event Index Generation Finished ---")
-    print(f"Index saved to: {CONFIG['critical_event_index_file']}")
-    print(f"Total scenes with events: {len(critical_event_index)}")
-    total_events = sum(len(v) for v in critical_event_index.values())
-    print(f"Total event clips: {total_events}")
-    print(f" - Found by Peak FDE: {peak_count}")
-    print(f" - Found by FDE Spike: {spike_count}")
+
+def visualize_and_save_event(event, nusc, output_path):
+    """为单个事件在误差峰值帧生成并保存可视化图像"""
+    peak_sample_token = event['peak_sample_token']
+    sample_record = nusc.get('sample', peak_sample_token)
+
+    # 准备要绘制的box和颜色
+    boxes_to_draw = []
+    colors_to_draw = []
+
+    for ann_token in sample_record['anns']:
+        ann_record = nusc.get('sample_annotation', ann_token)
+        instance_token = ann_record['instance_token']
+
+        color = None
+        if instance_token == event['key_agent_token']:
+            color = (255, 0, 0)  # 红色 for key agent
+        elif instance_token in event['interacting_agent_tokens']:
+            color = (0, 0, 255)  # 蓝色 for interacting agents
+
+        if color:
+            box = Box(ann_record['translation'], ann_record['size'], Quaternion(ann_record['rotation']))
+            boxes_to_draw.append(box)
+            colors_to_draw.append(color)
+
+    # 定义相机顺序和拼接图像
+    CAMERAS = [
+        'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT',
+        'CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT'
+    ]
+
+    # 渲染每个相机视图
+    images = []
+    for cam in CAMERAS:
+        cam_token = sample_record['data'][cam]
+        # 使用 extra_boxes 参数来绘制我们自定义的框
+        # with_anns=False 确保不绘制默认的 nuScenes 标注
+        img_path, _, _ = nusc.get_sample_data(cam_token, box_vis_level=0)
+        img = Image.open(img_path)
+        nusc.render_boxes_on_image(img, boxes_to_draw, colors=colors_to_draw)
+        images.append(img)
+
+    # 拼接图像
+    width, height = images[0].size
+    stitched_image = Image.new('RGB', (width * 3, height * 2))
+
+    for i, img in enumerate(images):
+        row = i // 3
+        col = i % 3
+        stitched_image.paste(img, (col * width, row * height))
+
+    # 保存图像
+    stitched_image.save(output_path)
+    # print(f"Saved visualization to {output_path}")
 
 
 if __name__ == '__main__':
-    main()
+    # --- 配置参数 ---
+    DATAROOT = '/data0/senzeyu2/dataset/nuscenes'  # <<<--- 修改为你的nuScenes路径
+    VERSION = 'v1.0-trainval'  # 或 'v1.0-trainval'
+    MODEL_PATH = 'seq2seq_model.pth'  # <<<--- 假设你已经训练好并保存了模型
+    OUTPUT_DIR = '/data0/senzeyu2/dataset/nuscenes/critical'  # <<<--- 输出目录
+
+    config = {
+        'hist_len': 8,
+        'future_len': 12,
+        'error_threshold_m': 3.0,
+        'proximity_radius_m': 20.0,
+        'min_event_frames': 5
+    }
+
+    # --- 初始化 ---
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    nusc = NuScenes(version=VERSION, dataroot=DATAROOT, verbose=False)
+
+    # --- 加载模型 ---
+    encoder = Encoder()
+    decoder = Decoder()
+    model = Seq2Seq(encoder, decoder, device).to(device)
+
+    if os.path.exists(MODEL_PATH):
+        print(f"Loading pre-trained model from {MODEL_PATH}")
+        model.load_state_dict(torch.load(MODEL_PATH))
+    else:
+        print(f"Warning: Model file {MODEL_PATH} not found. Using randomly initialized model.")
+
+    # --- 创建输出目录 ---
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+    # --- 创建检测器并处理所有场景 ---
+    detector = InteractionDetector(model, device, nusc, config)
+
+    total_events_found = 0
+    for scene_idx, scene in enumerate(tqdm(nusc.scene, desc="Processing Scenes")):
+        scene_token = scene['token']
+        scene_name = scene['name']
+
+        events = detector.detect_events_in_scene(scene_token)
+
+        if not events:
+            continue
+
+        total_events_found += len(events)
+
+        # 为当前场景创建子目录
+        scene_output_dir = os.path.join(OUTPUT_DIR, scene_name)
+        os.makedirs(scene_output_dir, exist_ok=True)
+
+        for event_idx, event in enumerate(events):
+            # 构造文件名
+            output_filename = f"event_{event_idx + 1}_peak_frame_{event['peak_frame_idx']}.png"
+            output_path = os.path.join(scene_output_dir, output_filename)
+
+            # 生成并保存可视化
+            visualize_and_save_event(event, nusc, output_path)
+
+            # 打印事件信息 (可选)
+            # print(f"\n--- Detected Event in Scene {scene_name} ---")
+            # print(f"  Key Agent: {event['key_agent_token']}")
+            # print(f"  Interacting Agents: {event['interacting_agent_tokens']}")
+            # print(f"  Saved to: {output_path}")
+
+    print(f"\nProcessing complete. Found a total of {total_events_found} potential interaction events.")
+    print(f"Visualizations saved in '{OUTPUT_DIR}' directory.")
+

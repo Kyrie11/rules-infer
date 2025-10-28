@@ -34,103 +34,153 @@ CONFIG = {
     'traffic_light_distance_threshold': 30.0
 }
 
-def train(model, iterator, optimizer, criterion, device, teacher_forcing_ratio):
+
+def get_heading(points):
+    """从轨迹的最后两点计算朝向角"""
+    p1, p2 = points[-2], points[-1]
+    if torch.all(p1 == p2): return 0.0
+    return torch.atan2(p2[1] - p1[1], p2[0] - p1[0])
+
+
+def transform_to_agent_centric(history, future):
+    """将一个样本的历史和未来轨迹转换到agent中心坐标系"""
+    anchor_point = history[-1, :2].clone()
+    anchor_yaw = get_heading(history[:, :2])
+
+    rot_matrix = torch.tensor([
+        [torch.cos(anchor_yaw), -torch.sin(anchor_yaw)],
+        [torch.sin(anchor_yaw), torch.cos(anchor_yaw)]
+    ])
+
+    # 转换历史轨迹坐标
+    history[:, :2] = (history[:, :2] - anchor_point) @ rot_matrix.T
+    # 转换未来轨迹坐标
+    future[:, :2] = (future[:, :2] - anchor_point) @ rot_matrix.T
+
+    return history, future
+
+
+def train_epoch(model, dataloader, optimizer, criterion, device, teacher_forcing_ratio):
     model.train()
     epoch_loss = 0
-    for i, (history, future, _) in enumerate(tqdm(iterator, desc="Training")):
-        history = history.to(device)
-        future = future.to(device)
+    for history_global, future_global in tqdm(dataloader, desc="Training"):
+        history_global, future_global = history_global.to(device), future_global.to(device)
+
+        # 对batch中的每个样本进行坐标系转换
+        batch_size = history_global.shape[0]
+        history_centric = torch.zeros_like(history_global)
+        future_centric = torch.zeros_like(future_global)
+
+        for i in range(batch_size):
+            history_centric[i], future_centric[i] = transform_to_agent_centric(
+                history_global[i], future_global[i]
+            )
 
         optimizer.zero_grad()
 
-        # future 包含了我们希望模型预测的目标
-        output = model(history, future, teacher_forcing_ratio)
+        # 注意这里的trg是future_centric
+        output = model(history_centric, future_centric, teacher_forcing_ratio)
 
-        # output: [batch_size, future_len, output_dim]
-        # future: [batch_size, future_len, output_dim]
-        loss = criterion(output, future)
-
+        loss = criterion(output, future_centric)
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1)  # 梯度裁剪
         optimizer.step()
 
         epoch_loss += loss.item()
 
-    return epoch_loss / len(iterator)
+    return epoch_loss / len(dataloader)
 
 
-def evaluate(model, iterator, criterion, device):
+def evaluate_epoch(model, dataloader, criterion, device):
     model.eval()
     epoch_loss = 0
     with torch.no_grad():
-        for i, (history, future, _) in enumerate(tqdm(iterator, desc="Evaluating")):
-            history = history.to(device)
-            future = future.to(device)
+        for history_global, future_global in tqdm(dataloader, desc="Evaluating"):
+            history_global, future_global = history_global.to(device), future_global.to(device)
 
-            # 在评估时，不使用 teacher forcing，并且将 future 传入仅用于确定预测长度
-            output = model(history, future, 0)  # teacher_forcing_ratio = 0
+            batch_size = history_global.shape[0]
+            history_centric = torch.zeros_like(history_global)
+            future_centric = torch.zeros_like(future_global)
 
-            loss = criterion(output, future)
+            for i in range(batch_size):
+                history_centric[i], future_centric[i] = transform_to_agent_centric(
+                    history_global[i], future_global[i]
+                )
+
+            # 评估时关闭 teacher forcing
+            output = model(history_centric, future_centric, 0)
+
+            loss = criterion(output, future_centric)
             epoch_loss += loss.item()
 
-    return epoch_loss / len(iterator)
-
-
-# ----------------------------------
-# 5. 主程序 (Main Program)
-# ----------------------------------
-def main():
-    print(f"Using device: {CONFIG['device']}")
-
-    # 1. 加载 NuScenes 数据
-    if not os.path.exists(CONFIG['dataroot']):
-        print(f"Error: NuScenes data root not found at {CONFIG['dataroot']}")
-        print("Please download the NuScenes dataset and update the 'dataroot' in CONFIG.")
-        return
-
-    nusc = NuScenes(version=CONFIG['version'], dataroot=CONFIG['dataroot'], verbose=False)
-
-    # 2. 创建数据集
-    full_dataset = NuScenesTrajectoryDataset(nusc, CONFIG)
-
-    if len(full_dataset) == 0:
-        print("Dataset is empty. Check data path and processing logic.")
-        return
-
-    # 3. 划分训练集和验证集
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
-
-    print(f"Training set size: {len(train_dataset)}")
-    print(f"Validation set size: {len(val_dataset)}")
-
-    # 4. 创建 DataLoader
-    train_loader = DataLoader(train_dataset, batch_size=CONFIG['batch_size'], shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=CONFIG['batch_size'], shuffle=False, num_workers=4)
-
-    # 5. 初始化模型、优化器和损失函数
-    encoder = Encoder(CONFIG['input_dim'], CONFIG['hidden_dim'], CONFIG['n_layers'])
-    decoder = Decoder(CONFIG['output_dim'], CONFIG['hidden_dim'], CONFIG['n_layers'])
-    model = Seq2Seq(encoder, decoder, CONFIG['device']).to(CONFIG['device'])
-
-    optimizer = optim.Adam(model.parameters(), lr=CONFIG['learning_rate'])
-    criterion = nn.MSELoss()  # 均方误差损失，适用于回归问题
-
-    # 6. 开始训练
-    best_val_loss = float('inf')
-    for epoch in range(CONFIG['n_epochs']):
-        print(f"\n--- Epoch {epoch + 1}/{CONFIG['n_epochs']} ---")
-
-        train_loss = train(model, train_loader, optimizer, criterion, CONFIG['device'], CONFIG['teacher_forcing_ratio'])
-        val_loss = evaluate(model, val_loader, criterion, CONFIG['device'])
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(model.state_dict(), 'nuscenes-lstm-model.pt')
-            print("  -> Saved best model")
-
-        print(f'Epoch {epoch + 1} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}')
+    return epoch_loss / len(dataloader)
 
 
 if __name__ == '__main__':
-    main()
+    # --- 配置 ---
+    config = {
+        'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <<<--- 修改为你的nuScenes路径
+        'version': 'v1.0-trainval',
+        'history_len': 8,  # 4s
+        'future_len': 12,  # 6s
+        'traffic_light_distance_threshold': 30.0,
+        # 训练参数
+        'batch_size': 64,
+        'learning_rate': 0.001,
+        'num_epochs': 20,
+        'val_split': 0.15,
+        'teacher_forcing_ratio': 0.5,
+        # 模型参数
+        'input_dim': 4,  # [x, y, is_near_tl, dist_to_tl]
+        'output_dim': 2,  # [x, y]
+        'hidden_dim': 64,
+        'n_layers': 2,
+        'model_save_path': 'seq2seq_model.pth'
+    }
+
+    # --- 初始化 ---
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    nusc = NuScenes(version=config['version'], dataroot=config['dataroot'], verbose=False)
+
+    # --- 数据加载 ---
+    full_dataset = NuScenesTrajectoryDataset(nusc, config)
+
+    val_size = int(len(full_dataset) * config['val_split'])
+    train_size = len(full_dataset) - val_size
+    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+
+    print(f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}")
+
+    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False, num_workers=4)
+
+    # --- 模型、优化器、损失函数 ---
+    encoder = Encoder(config['input_dim'], config['hidden_dim'], config['n_layers'])
+    decoder = Decoder(config['output_dim'], config['hidden_dim'], config['n_layers'])
+    model = Seq2Seq(encoder, decoder, device).to(device)
+
+    optimizer = optim.Adam(model.parameters(), lr=config['learning_rate'])
+    criterion = nn.MSELoss()  # 均方误差损失，适合坐标预测
+
+    # --- 训练循环 ---
+    best_valid_loss = float('inf')
+
+    for epoch in range(config['num_epochs']):
+        print(f"\n--- Epoch {epoch + 1}/{config['num_epochs']} ---")
+
+        train_loss = train_epoch(model, train_loader, optimizer, criterion, device, config['teacher_forcing_ratio'])
+        valid_loss = evaluate_epoch(model, val_loader, criterion, device)
+
+        if valid_loss < best_valid_loss:
+            best_valid_loss = valid_loss
+            torch.save(model.state_dict(), config['model_save_path'])
+            print(f"Validation loss improved. Model saved to {config['model_save_path']}")
+
+        print(f'Epoch {epoch + 1}:')
+        print(f'\tTrain Loss: {train_loss:.4f}')
+        print(f'\t Val. Loss: {valid_loss:.4f}')
+
+    print("\nTraining complete!")
+    print(f"Best model saved at '{config['model_save_path']}' with validation loss: {best_valid_loss:.4f}")
