@@ -393,21 +393,37 @@ if __name__ == '__main__':
     # 4. 创建并运行检测器
     detector = SocialInteractionDetector(model, nusc, cfg)
 
+    result = []
+    for i, scene_record in enumerate(nusc.scene):
+        scene_token = scene_record['token']
+        scene_name = scene_record['name']
+        scene_events = {"scene_token": scene_token}
+        try:
+            social_events = detector.analyze_scene(scene_token)
+            if social_events:
+                scene_events['events'] = social_events
+            result.append(scene_events)
+        except Exception as e:
+            print(e)
+    print(f"\nDetected {len(result)} potential social interaction events.")
+    with open(OUTPUT_JSON_PATH, 'w') as f:
+        json.dump(result, f, indent=2,
+                  default=lambda o: float(o) if isinstance(o, (np.float32, np.float64)) else o)
     # 以nuScenes-mini中的一个经典交互场景为例：scene-0103
     # 这个场景中，ego-vehicle在一个T字路口礼让行人
-    test_scene_token = nusc.scene[10]['token']  # scene-0103
-    print(f"\nAnalyzing scene: {nusc.get('scene', test_scene_token)['name']} ({test_scene_token})")
-
-    social_events = detector.analyze_scene(test_scene_token)
-
-    # 5. 打印结果
-    if social_events:
-        print(f"\nDetected {len(social_events)} potential social interaction events.")
-        # 只打印第一个事件的详细信息作为示例
-        first_event = social_events[0]
-        print("\n--- Example Event Report ---")
-        with open(OUTPUT_JSON_PATH, 'w') as f:
-            json.dump(first_event, f, indent=2,
-                         default=lambda o: float(o) if isinstance(o, (np.float32, np.float64)) else o)
-    else:
-        print("\nNo significant social interaction events detected in this scene.")
+    # test_scene_token = nusc.scene[10]['token']  # scene-0103
+    # print(f"\nAnalyzing scene: {nusc.get('scene', test_scene_token)['name']} ({test_scene_token})")
+    #
+    # social_events = detector.analyze_scene(test_scene_token)
+    #
+    # # 5. 打印结果
+    # if social_events:
+    #     print(f"\nDetected {len(social_events)} potential social interaction events.")
+    #     # 只打印第一个事件的详细信息作为示例
+    #     first_event = social_events[0]
+    #     print("\n--- Example Event Report ---")
+    #     with open(OUTPUT_JSON_PATH, 'w') as f:
+    #         json.dump(first_event, f, indent=2,
+    #                      default=lambda o: float(o) if isinstance(o, (np.float32, np.float64)) else o)
+    # else:
+    #     print("\nNo significant social interaction events detected in this scene.")
