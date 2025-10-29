@@ -263,7 +263,7 @@ def build_scene_track_cache(nusc, scene):
 
             # --- 核心修正部分 ---
             # 直接使用 ann_token 来获取速度
-            velocity = nusc.get('sample_annotation', ann['token'])['velocity']
+            velocity = nusc.get('sample_annotation', ann['token']).get('velocity', [0.0, 0.0])
 
             # nuScenes v1.0 schema for velocity is [vx, vy], but older devkit versions might have it nested.
             # We assume velocity is a list [vx, vy] or similar. Let's handle potential None.
