@@ -393,16 +393,17 @@ if __name__ == '__main__':
     # 4. 创建并运行检测器
     detector = SocialInteractionDetector(model, nusc, cfg)
 
-    result = []
+    result = {}
+    total_scenes = len(nusc.scene)
     for i, scene_record in enumerate(nusc.scene):
         scene_token = scene_record['token']
         scene_name = scene_record['name']
         scene_events = {"scene_token": scene_token}
+        print(f"\n[{i+1}/{total_scenes}] Processing scene: {scene_name} ({scene_token})")
         try:
             social_events = detector.analyze_scene(scene_token)
             if social_events:
-                scene_events['events'] = social_events
-            result.append(scene_events)
+                result[scene_name] = social_events
         except Exception as e:
             print(e)
     print(f"\nDetected {len(result)} potential social interaction events.")
