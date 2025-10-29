@@ -61,7 +61,7 @@ def visualize_event(nusc, event_data, output_dir):
 
     if not primary_ann:
         print(f"Warning: Primary agent for event {event_id} not found in closest sample. Skipping.")
-        return None  # 返回 None 表示没有成功保存
+        return None
 
     fig, axes = plt.subplots(2, 3, figsize=(24, 12), dpi=100)
     axes = axes.ravel()
@@ -75,30 +75,28 @@ def visualize_event(nusc, event_data, output_dir):
         # 1. 渲染背景图像
         nusc.render_sample_data(cam_token, with_anns=False, ax=ax)
 
-        # 2. [核心修改] 手动将3D Box投影并渲染到2D图像上
-
-        # 获取相机内外参用于投影
+        # 2. 手动将3D Box投影并渲染到2D图像上
         cs_record = nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
         pose_record = nusc.get('ego_pose', cam_data['ego_pose_token'])
         cam_intrinsic = np.array(cs_record['camera_intrinsic'])
 
-        # 定义一个内部函数来处理单个包围盒的渲染，避免代码重复
         def render_annotation_on_ax(ann, color, line_width):
-            # 从 annotation token 创建 Box 对象，它位于世界坐标系
             box = nusc.get_box(ann['token'])
 
-            # --- 坐标系转换 ---
-            # 1. 从世界坐标系转换到自车坐标系
+            # --- 坐标系转换 (保持不变) ---
             box.translate(-np.array(pose_record['translation']))
             box.rotate(Quaternion(pose_record['rotation']).inverse)
-
-            # 2. 从自车坐标系转换到相机坐标系
             box.translate(-np.array(cs_record['translation']))
             box.rotate(Quaternion(cs_record['rotation']).inverse)
 
-            # 3. 使用 Box.render() 在指定的ax上绘制，它会处理3D到2D的投影
-            #    注意：box.render()的view参数是相机内参
-            if box.in_camera_front(cam_intrinsic):
+            # [修正] 替换掉不存在的 'in_camera_front' 方法
+            # 手动检查Box是否在相机前方
+            # 获取Box在当前相机坐标系下的8个角点
+            corners_3d = box.corners()
+            # 如果任何一个角点的z坐标 > 0，则它在相机前方
+            # corners_3d 是一个 3x8 的矩阵 (x, y, z for 8 corners)
+            # 我们检查第三行（索引为2）
+            if np.any(corners_3d[2, :] > 0):
                 box.render(ax, view=cam_intrinsic, normalize=True, colors=(color, color, color), linewidth=line_width)
 
         # 渲染 Primary Agent (红色)
@@ -117,7 +115,7 @@ def visualize_event(nusc, event_data, output_dir):
     plt.savefig(output_path)
     plt.close(fig)
 
-    return output_path  # 返回保存路径，表示成功
+    return output_path
 
 
 # 在主函数中也要做相应修改
