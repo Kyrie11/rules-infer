@@ -350,7 +350,7 @@ def main():
     # 假设模型已经能处理多类别输入 (例如方案B: Conditional LSTM)
     # num_agent_types = 3 # vehicle, pedestrian, bicycle
     # model = TrajectoryLSTM_Conditional(cfg, num_agent_types)
-    model = TrajectoryLSTM(hist_len=cfg.HIST_LEN, pred_len=cfg.PRED_LEN)  # 使用简单模型作为示例
+    model = TrajectoryLSTM(config=cfg)  # 使用简单模型作为示例
 
     try:
         model.load_state_dict(torch.load(cfg.MODEL_PATH))
