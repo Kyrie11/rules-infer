@@ -45,6 +45,16 @@ class Config:
     SAMPLE_INTERVAL_S = 0.5  # nuScenes采样间隔约0.5秒
     KINEMATICS_WINDOW_SIZE = 5  # 用于计算Jerk的点数 (中心点+/-2)
 
+    # --- 模型与训练参数 ---
+    HIST_LEN = 8  # 历史轨迹长度 (N_in)
+    PRED_LEN = 12  # 预测轨迹长度 (N_out)
+    INPUT_DIM = 2  # 输入特征维度 (x, y)
+    OUTPUT_DIM = 2  # 输出特征维度 (x, y)
+    BATCH_SIZE = 64
+    LEARNING_RATE = 0.001
+    NUM_EPOCHS = 20  # 演示目的，实际可增加
+    MODEL_SAVE_PATH = 'trajectory_lstm.pth'
+
 class EventAnalyzer:
     """
     对单个潜在事件进行深入分析，包括运动学(L2)和关系(L3)指标。
