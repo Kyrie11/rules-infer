@@ -653,4 +653,4 @@ def main_analysis_pipeline(config, nusc):
 if __name__ == '__main__':
     cfg = Config()
     nusc = NuScenes(version=cfg.NUSCENES_VERSION, dataroot=cfg.NUSCENES_DATA_ROOT, verbose=False)
-    main_analysis_pipeline()
+    main_analysis_pipeline(cfg, nusc)
