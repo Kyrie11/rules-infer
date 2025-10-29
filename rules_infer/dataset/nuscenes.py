@@ -5,77 +5,69 @@ from torch.utils.data import Dataset
 from nuscenes.nuscenes import NuScenes
 import numpy as np
 from tqdm import tqdm
+from pyquaternion import Quaternion
 
 
 class NuScenesTrajectoryDataset(Dataset):
-    def __init__(self, nusc, hist_len=8, pred_len=12, split='v1.0-trainval'):
+    def __init__(self, config, nusc):
+        self.config = config
         self.nusc = nusc
-        self.hist_len = hist_len
-        self.pred_len = pred_len
-        self.seq_len = hist_len + pred_len
-        self.samples = []
-        self._prepare_data(split)
+        self.sequences = self._create_sequences()
 
-    def _prepare_data(self, split):
-        print("Preparing data samples (including vehicles and humans)...")
-        scene_splits = self._get_scene_splits(split)
+    def _create_sequences(self):
+        sequences = []
+        seq_len = self.config.HIST_LEN + self.config.PRED_LEN
 
-        for scene in tqdm(self.nusc.scene):
-            if scene['name'] not in scene_splits:
-                continue
-
+        for scene in tqdm(self.nusc.scene, desc="Processing Scenes for Dataset"):
+            instance_tracks = {}
             first_sample_token = scene['first_sample_token']
-            sample_tokens = self._get_sample_tokens_in_scene(first_sample_token)
-            instance_trajectories = self._get_instance_trajectories(sample_tokens)
+            sample = self.nusc.get('sample', first_sample_token)
 
-            for instance_token, trajectory in instance_trajectories.items():
-                if len(trajectory) >= self.seq_len:
-                    for i in range(len(trajectory) - self.seq_len + 1):
-                        self.samples.append(trajectory[i: i + self.seq_len])
+            # 遍历场景中的所有sample
+            while sample:
+                for ann_token in sample['anns']:
+                    ann = self.nusc.get('sample_annotation', ann_token)
+                    # 只关心车辆
+                    if 'vehicle' in ann['category_name']:
+                        instance_token = ann['instance_token']
+                        if instance_token not in instance_tracks:
+                            instance_tracks[instance_token] = []
 
-    def _get_scene_splits(self, split_name):
-        from nuscenes.utils.splits import create_splits_scenes
-        splits = create_splits_scenes()
-        return splits[split_name]
+                        # 获取车辆在全局坐标系下的信息
+                        box = Box(ann['translation'], ann['size'], Quaternion(ann['rotation']))
+                        pos = box.center[:2]  # 全局 x, y
 
-    def _get_sample_tokens_in_scene(self, first_token):
-        tokens = []
-        current_token = first_token
-        while current_token != "":
-            tokens.append(current_token)
-            sample = self.nusc.get('sample', current_token)
-            current_token = sample['next']
-        return tokens
+                        instance_tracks[instance_token].append({
+                            'pos': pos,
+                            'sample_token': sample['token'],
+                            'instance_token': instance_token,
+                            'timestamp': sample['timestamp']
+                        })
 
-    def _get_instance_trajectories(self, sample_tokens):
-        trajectories = {}
-        for token in sample_tokens:
-            sample = self.nusc.get('sample', token)
-            for ann_token in sample['anns']:
-                ann = self.nusc.get('sample_annotation', ann_token)
+                if not sample['next']:
+                    break
+                sample = self.nusc.get('sample', sample['next'])
 
-                # --- MODIFICATION START ---
-                # 检查类别是否为车辆或行人
-                is_vehicle = ann['category_name'].startswith('vehicle')
-                is_human = ann['category_name'].startswith('human')
+            # 从每个instance的完整轨迹中切分出历史和未来序列
+            for instance_token, track in instance_tracks.items():
+                if len(track) >= seq_len:
+                    for i in range(len(track) - seq_len + 1):
+                        sequence_data = track[i: i + seq_len]
 
-                if is_vehicle or is_human:
-                    # --- MODIFICATION END ---
-                    instance_token = ann['instance_token']
-                    if instance_token not in trajectories:
-                        trajectories[instance_token] = []
-                    trajectories[instance_token].append(ann['translation'][:2])  # (x, y)
-        return trajectories
+                        # 将坐标相对于历史轨迹的最后一个点进行归一化
+                        origin = sequence_data[self.config.HIST_LEN - 1]['pos']
+
+                        history = np.array([p['pos'] - origin for p in sequence_data[:self.config.HIST_LEN]])
+                        future = np.array([p['pos'] - origin for p in sequence_data[self.config.HIST_LEN:]])
+
+                        sequences.append((
+                            torch.tensor(history, dtype=torch.float32),
+                            torch.tensor(future, dtype=torch.float32)
+                        ))
+        return sequences
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.sequences)
 
     def __getitem__(self, idx):
-        full_trajectory = np.array(self.samples[idx], dtype=np.float32)
-        history = full_trajectory[:self.hist_len]
-        future = full_trajectory[self.hist_len:]
-        origin = history[-1].copy()
-        history -= origin
-        future -= origin
-
-        return torch.from_numpy(history), torch.from_numpy(future)
+        return self.sequences[idx]

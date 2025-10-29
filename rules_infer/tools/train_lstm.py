@@ -22,62 +22,35 @@ EPOCHS = 10
 
 
 # --- 主函数 ---
-def main():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+def train_lstm(config, nusc):
+    print("--- Starting LSTM Training ---")
+    dataset = NuScenesTrajectoryDataset(config, nusc)
+    if not dataset:
+        print("Dataset is empty. Skipping training.")
+        return
 
-    # 1. 加载NuScenes数据集
-    nusc = NuScenes(version=NUSCENES_VERSION, dataroot=NUSCENES_PATH, verbose=True)
+    dataloader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=True)
 
-    # --- MODIFICATION START ---
-    # 根据数据集版本，选择正确的split名称
-    if NUSCENES_VERSION == 'v1.0-mini':
-        train_split_name = 'mini_train'
-    else:  # 'v1.0-trainval'
-        train_split_name = 'train'
-    print(f"Using '{train_split_name}' split for training.")
-    # --- MODIFICATION END ---
-
-    # 2. 创建Dataset和DataLoader
-    # 将正确的 split name 传入 Dataset
-    train_dataset = NuScenesTrajectoryDataset(nusc, hist_len=HIST_LEN, pred_len=PRED_LEN, split=train_split_name)
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
-
-    # 3. 初始化模型、损失函数和优化器
-    model = TrajectoryLSTM(pred_len=PRED_LEN).to(device)
+    model = TrajectoryLSTM(config)
+    optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    # 4. 训练循环
-    print("Starting training...")
-    for epoch in range(EPOCHS):
-        model.train()
-        total_loss = 0
-        # tqdm for better progress bar
-        from tqdm import tqdm
-        for history, future_gt in tqdm(train_loader, desc=f"Epoch {epoch + 1}/{EPOCHS}"):
-            history = history.to(device)
-            future_gt = future_gt.to(device)
-
-            # 前向传播
-            future_pred = model(history)
-
-            # 计算损失
-            loss = criterion(future_pred, future_gt)
-
-            # 反向传播和优化
+    model.train()
+    for epoch in range(config.NUM_EPOCHS):
+        epoch_loss = 0
+        for history, future in tqdm(dataloader, desc=f"Epoch {epoch + 1}/{config.NUM_EPOCHS}"):
             optimizer.zero_grad()
+
+            predictions = model(history)
+            loss = criterion(predictions, future)
+
             loss.backward()
             optimizer.step()
 
-            total_loss += loss.item()
+            epoch_loss += loss.item()
 
-        print(f'Epoch [{epoch + 1}/{EPOCHS}] finished. Average Loss: {total_loss / len(train_loader):.4f}')
+        avg_loss = epoch_loss / len(dataloader)
+        print(f"Epoch {epoch + 1}/{config.NUM_EPOCHS}, Loss: {avg_loss:.4f}")
 
-    # 5. 保存模型
-    torch.save(model.state_dict(), MODEL_SAVE_PATH)
-    print(f"Model saved to {MODEL_SAVE_PATH}")
-
-
-if __name__ == '__main__':
-    main()
+    torch.save(model.state_dict(), config.MODEL_SAVE_PATH)
+    print(f"Model trained and saved to {config.MODEL_SAVE_PATH}")
