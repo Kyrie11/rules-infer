@@ -8,39 +8,33 @@ from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.splits import create_splits_scenes
 from nuscenes.map_expansion.map_api import NuScenesMap
 import numpy as np
-from rules_infer.dataset.nuscenes import NuScenesTrajectoryDataset
+import pandas as pd
+from pyquaternion import Quaternion
+from nuscenes.utils.data_classes import Box
 from rules_infer.tools.motion_lstm import *
+import math
 
 
 class Config:
-    # --- 路径与数据集 ---
-    NUSCENES_DATA_ROOT = '/data0/senzeyu2/dataset/nuscenes'  # !!! 修改为你的路径 !!!
-    NUSCENES_VERSION = 'v1.0-trainval'
-    MODEL_PATH = 'trajectory_lstm.pth'
-    OUTPUT_JSON_PATH = 'social_interaction_events.json'
+    # --- 数据集与路径 ---
+    # !!! 修改为你的nuScenes数据集根目录 !!!
+    NUSCENES_DATA_ROOT = '/data0/senzeyu2/dataset/nuscenes'
+    NUSCENES_VERSION = 'v1.0-trainval'  # 使用mini数据集进行快速演示
 
-    # --- 模型参数 ---
-    HIST_LEN = 8
-    PRED_LEN = 12
+    # --- 模型与训练参数 ---
+    HIST_LEN = 8  # 历史轨迹长度 (N_in)
+    PRED_LEN = 12  # 预测轨迹长度 (N_out)
+    INPUT_DIM = 2  # 输入特征维度 (x, y)
+    OUTPUT_DIM = 2  # 输出特征维度 (x, y)
+    BATCH_SIZE = 64
+    LEARNING_RATE = 0.001
+    NUM_EPOCHS = 20  # 演示目的，实际可增加
+    MODEL_SAVE_PATH = 'trajectory_lstm.pth'
 
-    # --- 事件触发阈值 (L1) ---
-    FDE_THRESHOLD_ABS = 2.5  # 绝对FDE阈值 (米)
-    FDE_THRESHOLD_REL_FACTOR = 1.5  # 相对FDE阈值: FDE > speed * factor
-
-    # --- 事件分析阈值 (L2 & L3) ---
-    JERK_THRESHOLD = 8.0  # 急动度阈值 (m/s^3)
-    YAW_RATE_THRESHOLD = 0.4  # 偏航率阈值 (rad/s, 约23度/秒)
-    TTC_THRESHOLD = 4.0  # 碰撞时间阈值 (秒)
-    THW_THRESHOLD_FOLLOW = 2.5  # 跟车时距阈值 (秒)
-
-    # --- 影响区域定义 (Zone of Influence) ---
-    INTERACTION_ZONE_FORWARD = 50.0  # 前方 (米)
-    INTERACTION_ZONE_BACKWARD = 10.0  # 后方 (米)
-    INTERACTION_ZONE_LATERAL = 5.0  # 两侧 (米, 约一个半车道)
-
-    # --- 时间窗口 ---
-    SAMPLE_INTERVAL_S = 0.5  # nuScenes采样间隔约0.5秒
-    KINEMATICS_WINDOW_SIZE = 5  # 用于计算Jerk的点数 (中心点+/-2)
+    # --- 事件检测与分析参数 ---
+    FDE_THRESHOLD_M = 2.0  # 最终位移误差的绝对阈值（米）
+    FDE_VEL_MULTIPLIER = 1.5  # FDE的相对阈值，FDE > 速度 * 这个乘数
+    TTC_THRESHOLD_S = 4.0  # 触发交互分析的碰撞时间阈值（秒）
 
 
 class EventAnalyzer:
@@ -382,5 +376,281 @@ def main():
             print("-" * 20)
 
 
+def get_agent_state_at_timestamp(nusc, scene, instance_token, target_timestamp):
+    """获取指定agent在最接近目标时间戳时的状态"""
+    sample_token = scene['first_sample_token']
+    best_ann = None
+    min_time_diff = float('inf')
+
+    sample = nusc.get('sample', sample_token)
+    while sample:
+        for ann_token in sample['anns']:
+            ann = nusc.get('sample_annotation', ann_token)
+            if ann['instance_token'] == instance_token:
+                time_diff = abs(sample['timestamp'] - target_timestamp)
+                if time_diff < min_time_diff:
+                    min_time_diff = time_diff
+                    best_ann = ann
+
+        if not sample['next']:
+            break
+        sample = nusc.get('sample', sample['next'])
+
+    if best_ann:
+        box = Box(best_ann['translation'], best_ann['size'], Quaternion(best_ann['rotation']))
+        velocity = nusc.box_velocity(box.token)[:2]
+        return {
+            'pos': box.center[:2],
+            'vel': velocity,
+            'heading': box.orientation.yaw_pitch_roll[0],
+            'size': box.wlh[:2]
+        }
+    return None
+
+
+def calculate_acceleration_jerk(track_segment):
+    """从位置轨迹段计算加速度和Jerk"""
+    if len(track_segment) < 4: return None, None
+
+    # 假设时间间隔是恒定的 (nuScenes ~0.5s)
+    dt = (track_segment[1]['timestamp'] - track_segment[0]['timestamp']) / 1e6
+
+    # 计算速度 (v_i = (p_{i+1} - p_i) / dt)
+    velocities = [(p1['pos'] - p0['pos']) / dt for p0, p1 in zip(track_segment, track_segment[1:])]
+    if len(velocities) < 3: return None, None
+
+    # 计算加速度 (a_i = (v_{i+1} - v_i) / dt)
+    accelerations = [(v1 - v0) / dt for v0, v1 in zip(velocities, velocities[1:])]
+    if len(accelerations) < 2: return None, None
+
+    # 计算Jerk (j_i = (a_{i+1} - a_i) / dt)
+    jerks = [(a1 - a0) / dt for a0, a1 in zip(accelerations, accelerations[1:])]
+
+    # 我们关心事件发生时刻的加速度和Jerk
+    # track_segment的中心点对应事件时刻
+    center_idx = len(velocities) // 2
+    accel_magnitude = np.linalg.norm(accelerations[center_idx])
+    jerk_magnitude = np.linalg.norm(jerks[center_idx - 1])
+
+    return accel_magnitude, jerk_magnitude
+
+
+def calculate_ttc(agent1_state, agent2_state):
+    """计算两个agent之间的碰撞时间 (TTC)"""
+    rel_pos = agent2_state['pos'] - agent1_state['pos']
+    rel_vel = agent1_state['vel'] - agent2_state['vel']
+
+    rel_speed = np.linalg.norm(rel_vel)
+    if rel_speed < 1e-6:  # 相对速度几乎为0
+        return float('inf')
+
+    # 只有当agent1在追逐agent2时，TTC才有意义
+    # 即相对速度方向与相对位置方向大致相反 (点积为负)
+    if np.dot(rel_pos, rel_vel) > 0:
+        return float('inf')
+
+    ttc = np.linalg.norm(rel_pos) / rel_speed
+    return ttc
+
+
+def main_analysis_pipeline(config, nusc):
+    """完整的分析流程"""
+    print("\n--- Starting Analysis Pipeline ---")
+
+    # --- Part A: 离线预测 ---
+    print("Part A: Running offline predictions...")
+    model = TrajectoryLSTM(config)
+    try:
+        model.load_state_dict(torch.load(config.MODEL_SAVE_PATH))
+    except FileNotFoundError:
+        print(f"Error: Model file not found at {config.MODEL_SAVE_PATH}. Please train the model first.")
+        return
+    model.eval()
+
+    all_predictions = {}  # 存储所有预测结果
+    seq_len = config.HIST_LEN + config.PRED_LEN
+
+    for scene in tqdm(nusc.scene, desc="A: Predicting trajectories per scene"):
+        all_predictions[scene['token']] = {}
+        instance_tracks = {}  # {instance_token: [pos_data, ...]}
+
+        sample_token = scene['first_sample_token']
+        sample = nusc.get('sample', sample_token)
+        while sample:
+            for ann_token in sample['anns']:
+                ann = nusc.get('sample_annotation', ann_token)
+                if 'vehicle' in ann['category_name']:
+                    inst_token = ann['instance_token']
+                    if inst_token not in instance_tracks:
+                        instance_tracks[inst_token] = []
+
+                    box = Box(ann['translation'], ann['size'], Quaternion(ann['rotation']))
+                    instance_tracks[inst_token].append({
+                        'pos': box.center[:2],
+                        'timestamp': sample['timestamp'],
+                        'sample_token': sample['token'],
+                        'ann_token': ann['token']
+                    })
+            if not sample['next']: break
+            sample = nusc.get('sample', sample['next'])
+
+        # 对每个轨迹进行预测
+        for inst_token, track in instance_tracks.items():
+            if len(track) >= seq_len:
+                all_predictions[scene['token']][inst_token] = []
+                for i in range(len(track) - seq_len + 1):
+                    hist_data = track[i: i + config.HIST_LEN]
+                    future_data = track[i + config.HIST_LEN: i + seq_len]
+
+                    origin = hist_data[-1]['pos']
+                    hist_rel = np.array([p['pos'] - origin for p in hist_data])
+
+                    with torch.no_grad():
+                        hist_tensor = torch.tensor(hist_rel, dtype=torch.float32).unsqueeze(0)
+                        pred_rel = model(hist_tensor).squeeze(0).numpy()
+
+                    # 转回全局坐标
+                    pred_global = pred_rel + origin
+                    gt_global = np.array([p['pos'] for p in future_data])
+
+                    all_predictions[scene['token']][inst_token].append({
+                        'start_timestamp': hist_data[-1]['timestamp'],
+                        'predicted': pred_global,
+                        'ground_truth': gt_global
+                    })
+
+    # --- Part B: 事件触发 ---
+    print("Part B: Triggering potential events...")
+    candidate_events = []
+    for scene_token, scene_preds in tqdm(all_predictions.items(), desc="B: Finding high-error events"):
+        scene_info = nusc.get('scene', scene_token)
+        for inst_token, agent_preds in scene_preds.items():
+            for pred_info in agent_preds:
+                gt = pred_info['ground_truth']
+                pred = pred_info['predicted']
+
+                # 计算FDE (Final Displacement Error)
+                fde = np.linalg.norm(gt[-1] - pred[-1])
+
+                # 使用动态阈值判断
+                # 1. 获取当前速度
+                primary_agent_state = get_agent_state_at_timestamp(nusc, scene_info, inst_token,
+                                                                   pred_info['start_timestamp'])
+                if primary_agent_state is None: continue
+                speed = np.linalg.norm(primary_agent_state['vel'])
+
+                # 2. 判断是否触发
+                is_triggered = (fde > config.FDE_THRESHOLD_M and fde > speed * config.FDE_VEL_MULTIPLIER)
+
+                if is_triggered:
+                    candidate_events.append({
+                        'scene_token': scene_token,
+                        'instance_token': inst_token,
+                        'timestamp': pred_info['start_timestamp'],
+                        'fde': fde,
+                        'speed_at_event': speed
+                    })
+
+    print(f"Found {len(candidate_events)} candidate events.")
+
+    # --- Part C & D: 事件分析与归因, 并记录 ---
+    print("Part C & D: Analyzing and logging events...")
+    final_events = []
+    for event in tqdm(candidate_events, desc="C&D: Analyzing events"):
+        scene_token = event['scene_token']
+        primary_agent_token = event['instance_token']
+        event_timestamp = event['timestamp']
+
+        scene_info = nusc.get('scene', scene_token)
+        primary_agent_state = get_agent_state_at_timestamp(nusc, scene_info, primary_agent_token, event_timestamp)
+        if not primary_agent_state: continue
+
+        # --- L2 Metrics: 自我分析 ---
+        # 提取事件前后的一小段轨迹来计算Jerk
+        track = instance_tracks[primary_agent_token]  # instance_tracks from Part A
+        event_idx = -1
+        for i, p in enumerate(track):
+            if p['timestamp'] == event_timestamp:
+                event_idx = i
+                break
+
+        max_accel = max_jerk = None
+        if event_idx != -1 and event_idx > 1 and event_idx < len(track) - 2:
+            track_segment = track[event_idx - 2: event_idx + 3]  # 5个点
+            max_accel, max_jerk = calculate_acceleration_jerk(track_segment)
+
+        # --- L3 Metrics: 关系分析 ---
+        min_ttc = float('inf')
+        interacting_agent_token = None
+
+        # 找到事件发生时场景中的所有其他agent
+        sample = nusc.get('sample', nusc.get('sample_annotation',
+                                             nusc.get_instance(primary_agent_token)['first_annotation_token'])[
+            'sample_token'])
+        # A simpler way to get the sample at the event time is needed. Let's find it.
+        event_sample_token = None
+        for p in track:
+            if p['timestamp'] == event_timestamp:
+                event_sample_token = p['sample_token']
+                break
+
+        if event_sample_token:
+            sample = nusc.get('sample', event_sample_token)
+            for ann_token in sample['anns']:
+                ann = nusc.get('sample_annotation', ann_token)
+                if ann['instance_token'] != primary_agent_token and 'vehicle' in ann['category_name']:
+                    other_agent_state = get_agent_state_at_timestamp(nusc, scene_info, ann['instance_token'],
+                                                                     event_timestamp)
+                    if not other_agent_state: continue
+
+                    ttc = calculate_ttc(primary_agent_state, other_agent_state)
+                    if ttc < min_ttc:
+                        min_ttc = ttc
+                        interacting_agent_token = ann['instance_token']
+
+        # --- 事件标注 ---
+        event_label = "High_FDE_Event"  # 默认标签
+        if max_jerk and max_jerk > 10:  # 10 m/s^3 是一个比较大的值
+            event_label = "Sudden_Maneuver"
+            if min_ttc < config.TTC_THRESHOLD_S:
+                # 检查交互对象是在前方还是侧方
+                rel_pos = get_agent_state_at_timestamp(nusc, scene_info, interacting_agent_token, event_timestamp)[
+                              'pos'] - primary_agent_state['pos']
+                # 旋转到主车坐标系
+                heading_quat = Quaternion(axis=[0, 0, 1], angle=primary_agent_state['heading'])
+                rel_pos_local = heading_quat.inverse.rotate(np.array([rel_pos[0], rel_pos[1], 0]))
+
+                if rel_pos_local[0] > 0:  # 交互对象在前方
+                    event_label = "Hard_Brake_for_Lead_Vehicle"
+                else:
+                    event_label = "Evasive_Action_for_Side_Vehicle"
+
+        final_events.append({
+            'scene_token': scene_token,
+            'primary_agent': primary_agent_token,
+            'timestamp': event_timestamp,
+            'event_label': event_label,
+            'fde_m': event['fde'],
+            'speed_kmh': event['speed_at_event'] * 3.6,
+            'max_accel_ms2': max_accel,
+            'max_jerk_ms3': max_jerk,
+            'min_ttc_s': min_ttc if min_ttc != float('inf') else -1,
+            'interacting_agent': interacting_agent_token
+        })
+
+    # --- 保存结果 ---
+    if final_events:
+        df = pd.DataFrame(final_events)
+        output_path = 'social_interaction_events.csv'
+        df.to_csv(output_path, index=False)
+        print(f"\nAnalysis complete. Found {len(df)} significant events. Results saved to {output_path}")
+        print("--- Event Log Preview ---")
+        print(df.head())
+    else:
+        print("\nAnalysis complete. No significant events were found with the current thresholds.")
+
+
 if __name__ == '__main__':
-    main()
+    cfg = Config()
+    nusc = NuScenes(version=cfg.NUSCENES_VERSION, dataroot=cfg.NUSCENES_DATA_ROOT, verbose=False)
+    main_analysis_pipeline()
