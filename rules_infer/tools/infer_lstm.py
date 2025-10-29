@@ -13,7 +13,7 @@ from pyquaternion import Quaternion
 from nuscenes.utils.data_classes import Box
 from rules_infer.tools.motion_lstm import *
 import math
-
+import json
 
 class Config:
     # --- 路径与数据集 ---
@@ -356,6 +356,20 @@ def calculate_ttc(agent1_state, agent2_state):
     ttc = np.linalg.norm(rel_pos) / rel_speed
     return ttc
 
+class NumpyEncoder(json.JSONEncoder):
+    """
+    自定义编码器，用于处理json.dump无法序列化的NumPy类型。
+    这是解决相关TypeError的标准方法。
+    """
+    def default(self, obj):
+        if isinstance(obj, np.integer):
+            return int(obj)      # 将NumPy整数转换为Python整数
+        elif isinstance(obj, np.floating):
+            return float(obj)    # 将NumPy浮点数转换为Python浮点数
+        elif isinstance(obj, np.ndarray):
+            return obj.tolist()  # 将NumPy数组转换为Python列表
+        else:
+            return super(NumpyEncoder, self).default(obj)
 
 def main():
     """主执行函数，协调整个分析流程。"""
@@ -454,8 +468,8 @@ def main():
     # --- 3. 保存所有发现的事件到JSON文件 ---
     print(f"\nAnalysis complete. Found {len(all_final_events)} significant social interaction events.")
     if all_final_events:
-        with open(cfg.OUTPUT_JSON_PATH, 'w') as f:
-            json.dump(all_final_events, f, indent=4)
+        with open(cfg.OUTPUT_JSON_PATH, 'w', encoding='utf-8') as f:
+            json.dump(all_final_events, f, indent=4, cls=NumpyEncoder)
         print(f"Results saved to {cfg.OUTPUT_JSON_PATH}")
         print("\n--- Sample of Detected Events ---")
         print(json.dumps(all_final_events[0], indent=2))
