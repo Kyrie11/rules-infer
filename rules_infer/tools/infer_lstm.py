@@ -49,8 +49,8 @@ CONFIG = {
     'critical_event_index_file': 'critical_events.json'
 }
 # --- 配置参数 ---
-NUSCENES_PATH = '/path/to/your/nuscenes'  # 修改为你的nuscenes数据集路径
-NUSCENES_VERSION = 'v1.0-mini'  # 或 'v1.0-trainval'
+NUSCENES_PATH = '/data0/senzeyu2/dataset/nuscenes'  # 修改为你的nuscenes数据集路径
+NUSCENES_VERSION = 'v1.0-trainval'  # 或 'v1.0-trainval'
 MODEL_PATH = 'trajectory_lstm.pth'
 OUTPUT_JSON_PATH = 'social_events_with_humans.json'  # 新的输出文件名
 
