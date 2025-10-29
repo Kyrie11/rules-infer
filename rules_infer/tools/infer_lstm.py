@@ -11,457 +11,378 @@ from rules_infer.tools.motion_lstm import *
 import math
 import json
 
-class Config:
-    # --- 路径与数据集 ---
-    NUSCENES_DATA_ROOT = '/data0/senzeyu2/dataset/nuscenes'  # !!! 修改为你的路径 !!!
-    NUSCENES_VERSION = 'v1.0-trainval'
-    MODEL_PATH = 'trajectory_lstm.pth'
-    OUTPUT_JSON_PATH = 'social_interaction_events.json'
 
-    # --- 模型参数 ---
-    HIST_LEN = 8
-    PRED_LEN = 12
+def calculate_kinematics(positions, timestamps):
+    """从位置和时间戳计算速度和加速度"""
+    velocities = np.zeros_like(positions)
+    accelerations = np.zeros_like(positions)
 
-    # --- 事件触发阈值 (L1) ---
-    FDE_THRESHOLD_ABS = 2.5  # 绝对FDE阈值 (米)
-    FDE_THRESHOLD_REL_FACTOR = 1.5  # 相对FDE阈值: FDE > speed * factor
+    dt = np.diff(timestamps)
+    # 防止除以零
+    dt[dt < 1e-6] = 1e-6
 
-    # --- 事件分析阈值 (L2 & L3) ---
-    JERK_THRESHOLD = 8.0  # 急动度阈值 (m/s^3)
-    YAW_RATE_THRESHOLD = 0.4  # 偏航率阈值 (rad/s, 约23度/秒)
-    TTC_THRESHOLD = 4.0  # 碰撞时间阈值 (秒)
-    THW_THRESHOLD_FOLLOW = 2.5  # 跟车时距阈值 (秒)
+    # 计算速度
+    vel = np.diff(positions, axis=0) / dt[:, np.newaxis]
+    velocities[1:] = vel
 
-    # --- 影响区域定义 (Zone of Influence) ---
-    INTERACTION_ZONE_FORWARD = 50.0  # 前方 (米)
-    INTERACTION_ZONE_BACKWARD = 10.0  # 后方 (米)
-    INTERACTION_ZONE_LATERAL = 5.0  # 两侧 (米, 约一个半车道)
+    # 计算加速度
+    accel = np.diff(vel, axis=0) / dt[1:, np.newaxis]
+    accelerations[2:] = accel
 
-    # --- 时间窗口 ---
-    SAMPLE_INTERVAL_S = 0.5  # nuScenes采样间隔约0.5秒
-    KINEMATICS_WINDOW_SIZE = 5  # 用于计算Jerk的点数 (中心点+/-2)
-
-    # --- 模型与训练参数 ---
-    HIST_LEN = 8  # 历史轨迹长度 (N_in)
-    PRED_LEN = 12  # 预测轨迹长度 (N_out)
-    INPUT_DIM = 2  # 输入特征维度 (x, y)
-    OUTPUT_DIM = 2  # 输出特征维度 (x, y)
-    BATCH_SIZE = 64
-    LEARNING_RATE = 0.001
-    NUM_EPOCHS = 20  # 演示目的，实际可增加
-    MODEL_SAVE_PATH = 'trajectory_lstm.pth'
-    MIN_EVENT_DURATION_FRAMES = 3  # 一个事件必须持续至少3帧 (约1.5秒)才被认为是有效事件
-    INTERACTION_LOOKBACK_SEC = 3.0
+    return velocities, accelerations
 
 
-class EventAnalyzer:
-    # __init__ 和其他方法保持不变，除了 _analyze_relations
+def check_line_segment_intersection(p1, p2, p3, p4):
+    """检查线段(p1, p2)和(p3, p4)是否相交"""
 
-    def __init__(self, config, scene_cache, primary_agent_token, event_info, all_predictions):
+    def orientation(p, q, r):
+        val = (q[1] - p[1]) * (r[0] - q[0]) - (q[0] - p[0]) * (r[1] - q[1])
+        if val == 0: return 0  # Collinear
+        return 1 if val > 0 else 2  # Clockwise or Counterclockwise
+
+    o1 = orientation(p1, p2, p3)
+    o2 = orientation(p1, p2, p4)
+    o3 = orientation(p3, p4, p1)
+    o4 = orientation(p3, p4, p2)
+
+    if o1 != o2 and o3 != o4:
+        return True
+
+    return False
+
+
+# ----------------- 主检测器类 -----------------
+
+class SocialInteractionDetector:
+    def __init__(self, model, nusc, config):
+        self.model = model
+        self.nusc = nusc
         self.config = config
-        self.scene_cache = scene_cache
-        self.primary_agent_token = primary_agent_token
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model.to(self.device)
+        self.model.eval()
 
-        # event_info 现在是一个包含 start, end, peak_timestamp 的字典
-        self.event_info = event_info
-        self.event_peak_timestamp = event_info['peak_timestamp']
+    def _get_agent_trajectories_in_scene(self, scene_token):
+        """从nuScenes SDK中提取并整理场景中所有agent的轨迹数据"""
+        scene = self.nusc.get('scene', scene_token)
+        first_sample_token = scene['first_sample_token']
 
-        self.all_predictions = all_predictions
+        agent_data = defaultdict(lambda: defaultdict(list))
 
-        self.primary_data = self.scene_cache['agents'].get(primary_agent_token, {})
-        self.primary_track = self.primary_data.get('track', [])
-        # 分析的基准状态是事件峰值时刻的状态
-        self.primary_state_at_event = self._get_state_from_track(self.primary_track, self.event_peak_timestamp)
+        current_sample_token = first_sample_token
+        while current_sample_token:
+            sample = self.nusc.get('sample', current_sample_token)
+            for ann_token in sample['anns']:
+                ann = self.nusc.get('sample_annotation', ann_token)
+                instance_token = ann['instance_token']
 
-    def analyze(self):
-        """执行完整的事件分析并返回结构化的事件数据。"""
-        if not self.primary_state_at_event:
-            return None
+                agent_data[instance_token]['timestamps'].append(sample['timestamp'])
+                agent_data[instance_token]['positions'].append(ann['translation'][:2])  # 只取XY
+                agent_data[instance_token]['rotations'].append(ann['rotation'])
+                agent_data[instance_token]['category_name'].append(ann['category_name'])
 
-        kinematics = self._calculate_kinematics(self.event_peak_timestamp)  # 传入峰值时间戳
-        interacting_agents, relational_metrics = self._analyze_relations() # 使用新的回溯分析方法
+            current_sample_token = sample['next']
 
-        event_label = self._determine_event_label(kinematics, relational_metrics)
-        if event_label == "High_FDE_Only":
-            return None
+        # 转换为numpy数组并计算运动学信息
+        processed_agent_data = {}
+        for instance_token, data in agent_data.items():
+            if len(data['timestamps']) < self.config['HIST_LEN'] + self.config['PRED_LEN']:
+                continue
 
-        event_data = {
-            "scene_token": self.scene_cache['scene_token'],
-            # 使用事件区间的真实起止时间
-            "start_timestamp": self.event_info['start_timestamp'],
-            "end_timestamp": self.event_info['end_timestamp'],
-            "duration_s": (self.event_info['end_timestamp'] - self.event_info['start_timestamp']) / 1e6,
-            "primary_agent_id": self.primary_agent_token,
-            "primary_agent_category": self.primary_data.get('category', 'unknown'),
-            "interacting_agent_ids": [agent['token'] for agent in interacting_agents],
-            "event_type_label": event_label,
-            "metrics_snapshot": {
-                "peak_fde": relational_metrics.get('peak_fde'),  # 改为 peak_fde
-                # ... (其他指标) ...
+            data_np = {
+                'timestamps': np.array(data['timestamps']) / 1e6,  # 微秒转秒
+                'positions': np.array(data['positions']),
+                'rotations': data['rotations'],
+                'category_name': data['category_name'][0]  # 假设类别不变
             }
+            velocities, accelerations = calculate_kinematics(data_np['positions'], data_np['timestamps'])
+            data_np['velocities'] = velocities
+            data_np['accelerations'] = accelerations
+
+            processed_agent_data[instance_token] = data_np
+
+        return processed_agent_data
+
+    def _calculate_trigger_metrics(self, pred_traj, gt_data):
+        """计算事件触发指标"""
+        gt_traj = gt_data['positions']
+
+        # 1. 位移误差
+        displacement_errors = np.linalg.norm(pred_traj - gt_traj, axis=1)
+        ade = np.mean(displacement_errors)
+        fde = displacement_errors[-1]
+
+        # 2. 运动学误差
+        # 为预测轨迹计算运动学
+        pred_vel, pred_accel = calculate_kinematics(pred_traj, gt_data['timestamps'])
+
+        # 提取真实轨迹的运动学
+        gt_vel = gt_data['velocities']
+        gt_accel = gt_data['accelerations']
+
+        vel_error = np.linalg.norm(pred_vel - gt_vel, axis=1)
+        accel_error = np.linalg.norm(pred_accel - gt_accel, axis=1)
+
+        # 计算纵向和横向速度误差
+        # 使用真实轨迹的朝向作为参考系
+        long_vel_errors, lat_vel_errors = [], []
+        for i in range(len(gt_data['rotations'])):
+            q = Quaternion(gt_data['rotations'][i])
+            heading_vec = q.rotation_matrix[:2, 0]  # X轴方向
+
+            v_error_vec = gt_vel[i] - pred_vel[i]
+            long_error = np.dot(v_error_vec, heading_vec)
+            lat_error = np.linalg.norm(v_error_vec - long_error * heading_vec)
+
+            long_vel_errors.append(long_error)
+            lat_vel_errors.append(lat_error)
+
+        return {
+            "ADE": ade,
+            "FDE": fde,
+            "max_velocity_error": np.max(vel_error) if vel_error.size > 0 else 0,
+            "max_acceleration_error": np.max(accel_error) if accel_error.size > 0 else 0,
+            "max_longitudinal_velocity_error": np.max(np.abs(long_vel_errors)) if long_vel_errors else 0
         }
-        # 为了简洁，此处省略了完整的字典构建，其结构与之前类似
-        return event_data
 
-    def _get_state_from_track(self, track, timestamp):
-        """内部辅助函数：从轨迹列表中安全地查找特定时间戳的状态。"""
-        return next((state for state in track if state['timestamp'] == timestamp), None)
+    def _calculate_attribution_metrics(self, primary_data, alter_data, event_start_idx, pred_len, primary_pred_traj):
+        """计算交互归因指标"""
+        H = self.config['HIST_LEN']
+        event_end_idx = event_start_idx + pred_len
 
-    def _calculate_kinematics(self):
-        """计算加速度、Jerk和偏航率。"""
-        kinematics = {}
+        # 找到两个agent在事件时间窗口内的重叠部分
+        ts_primary_start = primary_data['timestamps'][event_start_idx]
+        ts_primary_end = primary_data['timestamps'][event_end_idx - 1]
 
-        try:
-            event_idx = next(
-                i for i, state in enumerate(self.primary_track) if state['timestamp'] == self.event_timestamp)
-        except StopIteration:
-            return kinematics
+        alter_indices = np.where(
+            (alter_data['timestamps'] >= ts_primary_start) &
+            (alter_data['timestamps'] <= ts_primary_end)
+        )[0]
 
-        win = self.config.KINEMATICS_WINDOW_SIZE
-        if event_idx < win // 2 or event_idx >= len(self.primary_track) - (win // 2):
-            return kinematics
+        if len(alter_indices) == 0:
+            return None
 
-        segment = self.primary_track[event_idx - win // 2: event_idx + win // 2 + 1]
+        # 1. 最小距离
+        primary_pos_event = primary_data['positions'][event_start_idx:event_end_idx]
+        alter_pos_event = alter_data['positions'][alter_indices]
+        # 为了计算距离，我们需要对齐时间戳，这里做个简化，直接用所有组合的最小距离
+        min_dist = np.min(
+            np.linalg.norm(primary_pos_event[:, np.newaxis, :] - alter_pos_event[np.newaxis, :, :], axis=2))
 
-        pos = np.array([s['pos'] for s in segment])
-        ts = np.array([s['timestamp'] for s in segment]) / 1e6
-        dt = np.diff(ts)
+        # 2. 最小TTC (在事件开始前计算)
+        pre_event_idx_p = event_start_idx - 1
+        pre_event_ts = primary_data['timestamps'][pre_event_idx_p]
+        pre_event_idx_a = np.argmin(np.abs(alter_data['timestamps'] - pre_event_ts))
 
-        # 确保 dt 不为零
-        dt[dt < 1e-6] = 1e-6
+        pos_p = primary_data['positions'][pre_event_idx_p]
+        vel_p = primary_data['velocities'][pre_event_idx_p]
+        pos_a = alter_data['positions'][pre_event_idx_a]
+        vel_a = alter_data['velocities'][pre_event_idx_a]
 
-        vel = np.diff(pos, axis=0) / dt[:, np.newaxis]
-        accel = np.diff(vel, axis=0) / dt[1:, np.newaxis]
-        jerk = np.diff(accel, axis=0) / dt[2:, np.newaxis] if len(dt) > 2 else np.array([])
+        rel_pos = pos_a - pos_p
+        rel_vel = vel_a - vel_p
 
-        headings = np.unwrap([s['heading'] for s in segment])
-        yaw_rate = np.diff(headings) / dt
+        dist_sq = np.dot(rel_pos, rel_pos)
+        speed_sq = np.dot(rel_vel, rel_vel)
 
-        center_idx = win // 2
-        heading_vec = np.array([math.cos(segment[center_idx]['heading']), math.sin(segment[center_idx]['heading'])])
-        center_accel = accel[center_idx - 1]
+        min_ttc = float('inf')
+        # 只有在相互靠近时才计算TTC
+        if np.dot(rel_pos, rel_vel) < 0 and speed_sq > 1e-6:
+            ttc = -np.dot(rel_pos, rel_vel) / speed_sq
+            if ttc > 0:  # 只关心未来的碰撞
+                # 简单TTC计算
+                rel_speed_val = np.linalg.norm(vel_p - vel_a)
+                if rel_speed_val > 0.1:  # 避免除以零
+                    simple_ttc = np.linalg.norm(rel_pos) / rel_speed_val
+                    min_ttc = simple_ttc
 
-        kinematics['long_accel'] = np.dot(center_accel, heading_vec)
-        kinematics['lat_accel'] = np.cross(heading_vec, center_accel)
-        kinematics['jerk'] = np.linalg.norm(jerk[center_idx - 2]) if jerk.size > 0 else 0
-        kinematics['yaw_rate'] = yaw_rate[center_idx - 1]
+        # 3. 路径冲突分析
+        path_conflict = False
+        alter_path_segments = alter_data['positions'][alter_indices]
+        for i in range(len(primary_pred_traj) - 1):
+            p1, p2 = primary_pred_traj[i], primary_pred_traj[i + 1]
+            for j in range(len(alter_path_segments) - 1):
+                p3, p4 = alter_path_segments[j], alter_path_segments[j + 1]
+                if check_line_segment_intersection(p1, p2, p3, p4):
+                    path_conflict = True
+                    break
+            if path_conflict:
+                break
 
-        return kinematics
+        # 4. 相对位置
+        # 使用Frenet坐标系太复杂，这里简化为"前方/后方/左侧/右侧"
+        heading_q = Quaternion(primary_data['rotations'][pre_event_idx_p])
+        heading_vec = heading_q.rotation_matrix[:2, 0]  # X-axis
+        side_vec = heading_q.rotation_matrix[:2, 1]  # Y-axis
 
-    def _analyze_relations(self):
-        """
-        在事件发生前回溯一段时间，分析关系指标的演变，以找到真正的交互对象。
-        """
-        interacting_agents = []
-        relational_metrics = {}
+        long_dist = np.dot(rel_pos, heading_vec)
+        lat_dist = np.dot(rel_pos, side_vec)
 
-        # 1. 获取峰值FDE
-        agent_predictions = self.all_predictions.get(self.primary_agent_token, [])
-        pred_info = next((p for p in agent_predictions if p['timestamp'] == self.event_peak_timestamp), None)
-        if pred_info:
-            relational_metrics['peak_fde'] = np.linalg.norm(pred_info['ground_truth'][-1] - pred_info['predicted'][-1])
-
-        # 2. 建立回溯时间窗口
-        lookback_usec = int(self.config.INTERACTION_LOOKBACK_SEC * 1e6)
-        analysis_start_time = self.event_peak_timestamp - lookback_usec
-
-        # 提取主车在回溯窗口内的轨迹段
-        primary_segment = [s for s in self.primary_track if analysis_start_time <= s['timestamp'] <= self.event_peak_timestamp]
-        if not primary_segment:
-            return [], relational_metrics
-
-        # 3. 遍历所有其他agent，在回溯窗口内寻找最小TTC
-        global_min_ttc = float('inf')
-        causal_agent_token = None
-
-        for other_token, other_data in self.scene_cache['agents'].items():
-            if other_token == self.primary_agent_token:
-                continue
-
-            other_track = other_data.get('track', [])
-            other_segment = [s for s in other_track if analysis_start_time <= s['timestamp'] <= self.event_peak_timestamp]
-            if not other_segment:
-                continue
-
-            # 对齐两个agent在窗口内的轨迹
-            # (这是一个简化版对齐，假设时间戳能匹配)
-            for primary_state_hist in primary_segment:
-                ts = primary_state_hist['timestamp']
-                other_state_hist = self._get_state_from_track(other_segment, ts)
-                if not other_state_hist:
-                    continue
-
-                # 计算历史时刻的TTC
-                # (这里可以复用全局的 calculate_ttc 函数)
-                current_ttc = calculate_ttc(primary_state_hist, other_state_hist)
-
-                if current_ttc < global_min_ttc:
-                    global_min_ttc = current_ttc
-                    causal_agent_token = other_token
-
-        # 4. 如果找到了因果agent，记录下来
-        if global_min_ttc < self.config.TTC_THRESHOLD:
-            relational_metrics['min_ttc_s'] = global_min_ttc
-            interacting_agents.append({'token': causal_agent_token})
-        return interacting_agents, relational_metrics
-
-    def _determine_event_label(self, kinematics, relational_metrics):
-        """基于所有指标，给事件打上一个描述性标签。"""
-        jerk = kinematics.get('jerk', 0)
-        long_accel = kinematics.get('long_accel', 0)
-        yaw_rate = abs(kinematics.get('yaw_rate', 0))
-        min_ttc = relational_metrics.get('min_ttc', float('inf'))
-
-        is_hard_brake = long_accel < -3.0
-        is_sudden_jerk = jerk > self.config.JERK_THRESHOLD
-        is_sudden_swerve = yaw_rate > self.config.YAW_RATE_THRESHOLD
-        is_ttc_critical = min_ttc < self.config.TTC_THRESHOLD
-
-        if is_hard_brake or is_sudden_jerk:
-            if is_ttc_critical:
-                return "CRITICAL_BRAKE_FOR_LEAD_AGENT"
-            else:
-                return "SUDDEN_BRAKE_UNEXPLAINED"
-
-        if is_sudden_swerve:
-            if is_ttc_critical:
-                return "EVASIVE_SWERVE_FOR_AGENT"
-            else:
-                return "ABRUPT_LANE_CHANGE_OR_SWERVE"
-
-        if self.primary_state_at_event['speed'] < 1.0 and relational_metrics.get('fde', 0) > 1.5:
-            if is_ttc_critical:
-                return "YIELDING_AT_INTERSECTION_OR_MERGE"
-
-        return "High_FDE_Only"
-
-
-def build_scene_track_cache(nusc, scene):
-    """
-    为单个场景构建所有agent的轨迹缓存。
-    这个函数是关键，它将一次性提取所有需要的信息。
-    """
-    cache = {'scene_token': scene['token'], 'agents': {}}
-    sample_token = scene['first_sample_token']
-    sample = nusc.get('sample', sample_token)
-
-    while sample:
-        for ann_token in sample['anns']:
-            ann = nusc.get('sample_annotation', ann_token)
-
-            # 筛选我们关心的agent类别
-            category = ann['category_name']
-            if not any(cat in category for cat in ['vehicle', 'human.pedestrian', 'bicycle']):
-                continue
-
-            inst_token = ann['instance_token']
-            if inst_token not in cache['agents']:
-                cache['agents'][inst_token] = {
-                    'track': [],
-                    'category': category  # 记录agent的类别
-                }
-
-            # --- 核心修正部分 ---
-            # 直接使用 ann_token 来获取速度
-            velocity = nusc.get('sample_annotation', ann['token']).get('velocity', [0.0, 0.0])
-
-            # nuScenes v1.0 schema for velocity is [vx, vy], but older devkit versions might have it nested.
-            # We assume velocity is a list [vx, vy] or similar. Let's handle potential None.
-            if velocity is None:
-                velocity = [0.0, 0.0]  # 如果没有速度信息，则默认为0
-
-            # 使用Box类来方便地获取center和heading
-            box = Box(ann['translation'], ann['size'], Quaternion(ann['rotation']))
-
-            cache['agents'][inst_token]['track'].append({
-                'timestamp': sample['timestamp'],
-                'ann_token': ann['token'],  # 存储annotation_token，非常重要！
-                'pos': box.center[:2],
-                'vel': np.array(velocity[:2]),
-                'speed': np.linalg.norm(velocity[:2]),
-                'heading': box.orientation.yaw_pitch_roll[0],
-            })
-
-        if not sample['next']:
-            break
-        sample = nusc.get('sample', sample['next'])
-
-    # 对每个轨迹按时间戳排序，确保顺序正确
-    for inst_token in cache['agents']:
-        cache['agents'][inst_token]['track'].sort(key=lambda x: x['timestamp'])
-
-    return cache
-
-
-
-def calculate_acceleration_jerk(track_segment):
-    """从位置轨迹段计算加速度和Jerk"""
-    if len(track_segment) < 4: return None, None
-
-    # 假设时间间隔是恒定的 (nuScenes ~0.5s)
-    dt = (track_segment[1]['timestamp'] - track_segment[0]['timestamp']) / 1e6
-
-    # 计算速度 (v_i = (p_{i+1} - p_i) / dt)
-    velocities = [(p1['pos'] - p0['pos']) / dt for p0, p1 in zip(track_segment, track_segment[1:])]
-    if len(velocities) < 3: return None, None
-
-    # 计算加速度 (a_i = (v_{i+1} - v_i) / dt)
-    accelerations = [(v1 - v0) / dt for v0, v1 in zip(velocities, velocities[1:])]
-    if len(accelerations) < 2: return None, None
-
-    # 计算Jerk (j_i = (a_{i+1} - a_i) / dt)
-    jerks = [(a1 - a0) / dt for a0, a1 in zip(accelerations, accelerations[1:])]
-
-    # 我们关心事件发生时刻的加速度和Jerk
-    # track_segment的中心点对应事件时刻
-    center_idx = len(velocities) // 2
-    accel_magnitude = np.linalg.norm(accelerations[center_idx])
-    jerk_magnitude = np.linalg.norm(jerks[center_idx - 1])
-
-    return accel_magnitude, jerk_magnitude
-
-
-def calculate_ttc(agent1_state, agent2_state):
-    """计算两个agent之间的碰撞时间 (TTC)"""
-    rel_pos = agent2_state['pos'] - agent1_state['pos']
-    rel_vel = agent1_state['vel'] - agent2_state['vel']
-
-    rel_speed = np.linalg.norm(rel_vel)
-    if rel_speed < 1e-6:  # 相对速度几乎为0
-        return float('inf')
-
-    # 只有当agent1在追逐agent2时，TTC才有意义
-    # 即相对速度方向与相对位置方向大致相反 (点积为负)
-    if np.dot(rel_pos, rel_vel) > 0:
-        return float('inf')
-
-    ttc = np.linalg.norm(rel_pos) / rel_speed
-    return ttc
-
-class NumpyEncoder(json.JSONEncoder):
-    """
-    自定义编码器，用于处理json.dump无法序列化的NumPy类型。
-    这是解决相关TypeError的标准方法。
-    """
-    def default(self, obj):
-        if isinstance(obj, np.integer):
-            return int(obj)      # 将NumPy整数转换为Python整数
-        elif isinstance(obj, np.floating):
-            return float(obj)    # 将NumPy浮点数转换为Python浮点数
-        elif isinstance(obj, np.ndarray):
-            return obj.tolist()  # 将NumPy数组转换为Python列表
+        if long_dist > 0:
+            pos_desc = "front"
         else:
-            return super(NumpyEncoder, self).default(obj)
+            pos_desc = "rear"
 
-def main():
-    """主执行函数，协调整个分析流程。"""
-    cfg = Config()
+        if abs(lat_dist) > 2:  # 假设车道宽度约4米
+            if lat_dist > 0:
+                pos_desc += "-left"
+            else:
+                pos_desc += "-right"
 
-    # --- 1. 加载模型和数据 ---
-    print("Loading nuScenes and LSTM model...")
-    nusc = NuScenes(version=cfg.NUSCENES_VERSION, dataroot=cfg.NUSCENES_DATA_ROOT, verbose=False)
+        return {
+            "min_distance": min_dist,
+            "min_TTC_pre_event": min_ttc if min_ttc != float('inf') else None,
+            "predicted_path_conflict": path_conflict,
+            "relative_position": pos_desc
+        }
 
-    # 假设模型已经能处理多类别输入 (例如方案B: Conditional LSTM)
-    # num_agent_types = 3 # vehicle, pedestrian, bicycle
-    # model = TrajectoryLSTM_Conditional(cfg, num_agent_types)
-    model = TrajectoryLSTM(config=cfg)  # 使用简单模型作为示例
+    def analyze_scene(self, scene_token):
+        """分析整个场景，检测并归因社会性交互事件"""
+        all_agent_data = self._get_agent_trajectories_in_scene(scene_token)
+        detected_events = []
 
-    try:
-        model.load_state_dict(torch.load(cfg.MODEL_PATH))
-        model.eval()
-    except FileNotFoundError:
-        print(f"Error: Model file '{cfg.MODEL_PATH}' not found. Please ensure the trained model exists.")
-        return
+        H = self.config['HIST_LEN']
+        P = self.config['PRED_LEN']
 
-    all_final_events = []
+        for primary_id, primary_data in all_agent_data.items():
+            num_timesteps = len(primary_data['timestamps'])
 
-    # --- 2. 遍历所有场景 ---
-    for scene in tqdm(nusc.scene, desc="Processing Scenes"):
+            # 滑动窗口遍历轨迹
+            for i in range(num_timesteps - H - P + 1):
+                hist_end_idx = i + H
 
-        # 2a. 为当前场景构建包含所有agent轨迹的缓存
-        scene_cache = build_scene_track_cache(nusc, scene)
+                # 1. 准备模型输入
+                hist_positions = primary_data['positions'][i:hist_end_idx]
+                # 归一化：减去最后一个历史点的位置
+                last_hist_pos = hist_positions[-1]
+                normalized_hist = hist_positions - last_hist_pos
 
-        # 2b. 对缓存中的所有轨迹进行离线预测
-        all_predictions_in_scene = {}
-        high_fde_timestamps = {}  # key: inst_token, value: list of (timestamp, fde)
+                input_tensor = torch.from_numpy(normalized_hist).float().unsqueeze(0).to(self.device)
 
-        for inst_token, agent_preds in all_predictions_in_scene.items():
-            # >>> 问题3的解决方案：在这里过滤 primary agent 的类别 <<<
-            agent_category = scene_cache['agents'].get(inst_token, {}).get('category', '')
-            if 'vehicle' not in agent_category:
-                continue
+                # 2. 模型预测
+                with torch.no_grad():
+                    pred_relative_traj = self.model(input_tensor).squeeze(0).cpu().numpy()
 
-            primary_agent_track = scene_cache['agents'][inst_token]['track']
+                # 反归一化
+                pred_abs_traj = pred_relative_traj + last_hist_pos
 
-            for pred_info in agent_preds:
-                fde = np.linalg.norm(pred_info['ground_truth'][-1] - pred_info['predicted'][-1])
-                state = next((s for s in primary_agent_track if s['timestamp'] == pred_info['timestamp']), None)
-                if not state: continue
-                speed = state['speed']
+                # 3. 准备真值数据
+                gt_start_idx = hist_end_idx
+                gt_end_idx = gt_start_idx + P
+                gt_data_slice = {key: val[gt_start_idx:gt_end_idx] for key, val in primary_data.items()}
 
-                if fde > cfg.FDE_THRESHOLD_ABS and fde > speed * cfg.FDE_THRESHOLD_REL_FACTOR:
-                    if inst_token not in high_fde_timestamps:
-                        high_fde_timestamps[inst_token] = []
-                    high_fde_timestamps[inst_token].append((pred_info['timestamp'], fde))
+                # 4. 计算触发指标
+                trigger_metrics = self._calculate_trigger_metrics(pred_abs_traj, gt_data_slice)
 
-        # 步骤 2c-2: 对高FDE时间点进行分组，形成事件区间
-        candidate_event_groups = []
-        for inst_token, ts_fde_list in high_fde_timestamps.items():
-            if not ts_fde_list: continue
+                # 5. 判断是否触发事件
+                is_event = (trigger_metrics['FDE'] > self.config['THRESHOLDS']['FDE'] or
+                            trigger_metrics['max_longitudinal_velocity_error'] > self.config['THRESHOLDS'][
+                                'LONG_VEL_ERROR'])
 
-            ts_fde_list.sort()  # 按时间戳排序
-            current_group = [ts_fde_list[0]]
+                if is_event:
+                    # 6. 如果触发，开始归因分析
+                    candidate_agents = []
+                    for alter_id, alter_data in all_agent_data.items():
+                        if alter_id == primary_id:
+                            continue
 
-            for i in range(1, len(ts_fde_list)):
-                # 如果当前时间戳与上一时间戳是连续的 (间隔约0.5s)
-                time_diff = (ts_fde_list[i][0] - ts_fde_list[i - 1][0]) / 1e6
-                if time_diff < cfg.SAMPLE_INTERVAL_S * 1.5:
-                    current_group.append(ts_fde_list[i])
-                else:
-                    candidate_event_groups.append((inst_token, current_group))
-                    current_group = [ts_fde_list[i]]
-            candidate_event_groups.append((inst_token, current_group))
+                        attribution_metrics = self._calculate_attribution_metrics(primary_data, alter_data,
+                                                                                  gt_start_idx, P, pred_abs_traj)
+                        if attribution_metrics:
+                            # 简单交互评分：距离越近、TTC越小，分数越高
+                            score = 0
+                            if attribution_metrics['min_distance'] < 10:  # 只考虑10米内的agent
+                                score += 1.0 / (attribution_metrics['min_distance'] + 1e-6)
+                                if attribution_metrics['min_TTC_pre_event'] and attribution_metrics[
+                                    'min_TTC_pre_event'] < 5:
+                                    score += 2.0 / (attribution_metrics['min_TTC_pre_event'] + 1e-6)
+                                if attribution_metrics['predicted_path_conflict']:
+                                    score += 5.0  # 路径冲突是强信号
 
-        # 步骤 2d: 对每个事件区间进行分析
-        for inst_token, group in candidate_event_groups:
-            # >>> 问题1&2的解决方案：过滤短事件 <<<
-            if len(group) < cfg.MIN_EVENT_DURATION_FRAMES:
-                continue
+                            if score > 0.1:  # 过滤掉不相关的agent
+                                candidate_agents.append({
+                                    "agent_id": alter_id,
+                                    "agent_type": alter_data['category_name'],
+                                    "interaction_score": score,
+                                    "attribution_metrics": attribution_metrics
+                                })
 
-            # 找到峰值FDE的时刻作为分析的关键帧
-            peak_timestamp, peak_fde = max(group, key=lambda item: item[1])
+                    if not candidate_agents:  # 如果没有找到交互对象，可能不是交互事件
+                        continue
 
-            event_info = {
-                'start_timestamp': group[0][0],
-                'end_timestamp': group[-1][0],
-                'peak_timestamp': peak_timestamp,
-                'peak_fde': peak_fde,
-                'duration_frames': len(group)
-            }
+                    candidate_agents.sort(key=lambda x: x['interaction_score'], reverse=True)
 
-            analyzer = EventAnalyzer(
-                config=cfg,
-                scene_cache=scene_cache,
-                primary_agent_token=inst_token,
-                event_info=event_info,  # 传递整个事件信息
-                all_predictions=all_predictions_in_scene
-            )
-            event_details = analyzer.analyze()  # analyze 内部现在使用 event_info
+                    event_report = {
+                        "event_id": f"{scene_token}_{primary_id[:8]}_{gt_start_idx}",
+                        "timestamp_start": primary_data['timestamps'][gt_start_idx],
+                        "timestamp_end": primary_data['timestamps'][gt_end_idx - 1],
+                        "scene_context": {
+                            "location": self.nusc.get('log', self.nusc.get('scene', scene_token)['log_token'])[
+                                'location'],
+                            # HD Map信息需要更复杂的API调用，这里暂时留空
+                            "map_elements": []
+                        },
+                        "primary_agent": {
+                            "agent_id": primary_id,
+                            "agent_type": primary_data['category_name'],
+                            "event_trigger_metrics": trigger_metrics,
+                            "behavior_summary": "Deviation from kinematic prediction detected."
+                        },
+                        "candidate_interacting_agents": candidate_agents
+                    }
+                    detected_events.append(event_report)
 
-            if event_details:
-                all_final_events.append(event_details)
-
-    # --- 3. 保存所有发现的事件到JSON文件 ---
-    print(f"\nAnalysis complete. Found {len(all_final_events)} significant social interaction events.")
-    if all_final_events:
-        with open(cfg.OUTPUT_JSON_PATH, 'w', encoding='utf-8') as f:
-            json.dump(all_final_events, f, indent=4, cls=NumpyEncoder)
-        print(f"Results saved to {cfg.OUTPUT_JSON_PATH}")
-        print("\n--- Sample of Detected Events ---")
-        print(json.dumps(all_final_events[0], indent=2))
-    else:
-        print("No significant events were found with the current thresholds.")
+        return detected_events
 
 
 if __name__ == '__main__':
-    main()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # 1. 配置参数
+    CONFIG = {
+        'HIST_LEN': 10,  # 历史轨迹长度 (2秒 @ 5Hz)
+        'PRED_LEN': 12,  # 预测轨迹长度 (2.4秒 @ 5Hz)
+        'INPUT_DIM': 2,  # 输入维度 (x, y)
+        'OUTPUT_DIM': 2,  # 输出维度 (x, y)
+        'THRESHOLDS': {
+            'FDE': 3.0,  # Final Displacement Error 阈值 (米)
+            'LONG_VEL_ERROR': 2.0  # 纵向速度误差阈值 (米/秒), 表示明显的加减速
+        }
+    }
+
+    OUTPUT_JSON_PATH = "result.json"
+    # 2. 初始化nuScenes SDK
+    # 请修改为你自己的路径
+    nusc = NuScenes(version='v1.0-trainval', dataroot='/data0/senzeyu2/dataset/nuscenes', verbose=True)
+
+    # 3. 加载你预训练的LSTM模型
+    # 这里我们创建一个假的模型并加载一个虚拟的权重，你需要替换成你自己的
+    model = TrajectoryLSTM(CONFIG)
+    try:
+        # 替换 'trajectory_lstm.pth' 为你的模型文件
+        model.load_state_dict(torch.load('trajectory_lstm.pth', map_location=device))
+        print("Successfully loaded pre-trained model.")
+    except FileNotFoundError:
+        print("Warning: Model file 'trajectory_lstm.pth' not found. Using a randomly initialized model.")
+        # 如果没有模型，代码也能运行，但预测会是随机的，可能检测出很多“假”事件
+
+    # 4. 创建并运行检测器
+    detector = SocialInteractionDetector(model, nusc, CONFIG)
+
+    # 以nuScenes-mini中的一个经典交互场景为例：scene-0103
+    # 这个场景中，ego-vehicle在一个T字路口礼让行人
+    test_scene_token = nusc.scene[10]['token']  # scene-0103
+    print(f"\nAnalyzing scene: {nusc.get('scene', test_scene_token)['name']} ({test_scene_token})")
+
+    social_events = detector.analyze_scene(test_scene_token)
+
+    # 5. 打印结果
+    if social_events:
+        print(f"\nDetected {len(social_events)} potential social interaction events.")
+        # 只打印第一个事件的详细信息作为示例
+        first_event = social_events[0]
+        print("\n--- Example Event Report ---")
+        with open(OUTPUT_JSON_PATH, 'w') as f:
+            json.dump(first_event, f, indent=2,
+                         default=lambda o: float(o) if isinstance(o, (np.float32, np.float64)) else o)
+    else:
+        print("\nNo significant social interaction events detected in this scene.")
