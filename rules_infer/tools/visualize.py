@@ -1,20 +1,23 @@
 import os
 import json
+import time  # 导入time模块用于诊断
+
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+
 from nuscenes.nuscenes import NuScenes
-from nuscenes.utils.data_classes import Box
-from pyquaternion import Quaternion
 
-NUSCENES_DATAROOT = '/data0/senzeyu2/dataset/nuscenes' # nuScenes数据集的根目录
-NUSCENES_VERSION = 'v1.0-trainval'            # 使用的数据集版本 ('v1.0-mini' 或 'v1.0-trainval')
-EVENTS_JSON_PATH = 'result.json' # 你生成的事件JSON文件
-OUTPUT_DIR = '/data0/senzeyu2/dataset/nuscenes/events'         # 保存可视化结果的文件夹
-
+# ... (你的配置和未修改的函数保持不变) ...
+NUSCENES_DATAROOT = '/data0/senzeyu2/dataset/nuscenes'
+NUSCENES_VERSION = 'v1.0-trainval'
+EVENTS_JSON_PATH = 'result.json'
+OUTPUT_DIR = '/data0/senzeyu2/dataset/nuscenes/events'
 PRIMARY_AGENT_COLOR = (1, 0, 0)
 INTERACTING_AGENT_COLOR = (0, 0, 1)
+
 
 def find_closest_sample(nusc, scene_token, target_timestamp):
     # ... (代码不变)
@@ -29,35 +32,38 @@ def find_closest_sample(nusc, scene_token, target_timestamp):
             min_time_diff = time_diff
             closest_sample_token = current_sample_token
         current_sample_token = sample['next']
-        if time_diff > min_time_diff + 0.1:
-            break
+        if time_diff > min_time_diff + 0.1: break
     return nusc.get('sample', closest_sample_token)
+
 
 def get_annotation_for_instance(nusc, sample, instance_token):
     # ... (代码不变)
     for ann_token in sample['anns']:
         ann = nusc.get('sample_annotation', ann_token)
-        if ann['instance_token'] == instance_token:
-            return ann
+        if ann['instance_token'] == instance_token: return ann
     return None
 
+
+# --- 修改 visualize_event 函数，增加诊断信息 ---
 def visualize_event(nusc, event_data, output_dir):
-    # ... (代码不变)
     event_id = event_data['event_id']
+    # [诊断] 在函数开始时打印信息
+    # print(f"  - Starting visualization for event: {event_id}")
+
+    # ... (前面的数据准备代码不变) ...
     scene_token = event_id.split('_')[0]
     event_timestamp = event_data['timestamp_start']
     primary_agent_instance = event_data['primary_agent']['agent_id']
-    interacting_agents_instances = [
-        agent['agent_id'] for agent in event_data.get('candidate_interacting_agents', [])[:2]
-    ]
+    interacting_agents_instances = [agent['agent_id'] for agent in
+                                    event_data.get('candidate_interacting_agents', [])[:2]]
     sample = find_closest_sample(nusc, scene_token, event_timestamp)
     primary_ann = get_annotation_for_instance(nusc, sample, primary_agent_instance)
     interacting_anns = [get_annotation_for_instance(nusc, sample, inst) for inst in interacting_agents_instances]
     interacting_anns = [ann for ann in interacting_anns if ann is not None]
 
     if not primary_ann:
-        # print(f"Warning: Could not find primary agent annotation for event {event_id} at timestamp {event_timestamp}")
-        return
+        # [诊断] 让错误更明确
+        raise ValueError(f"Could not find primary agent annotation for event {event_id}")
 
     fig, axes = plt.subplots(2, 3, figsize=(24, 12), dpi=100)
     axes = axes.ravel()
@@ -75,12 +81,23 @@ def visualize_event(nusc, event_data, output_dir):
 
     fig.suptitle(f'Event: {event_id}\n(Primary: Red, Interacting: Blue)', fontsize=20)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
     output_path = os.path.join(output_dir, f"{event_id}.png")
+
+    # [诊断] 在保存前后都打印信息
+    # print(f"    - Attempting to save to: {output_path}")
+    save_start_time = time.time()
+
     plt.savefig(output_path)
+
+    save_duration = time.time() - save_start_time
+    # print(f"    - Save command finished in {save_duration:.2f} seconds.")
+
     plt.close(fig)
+    return output_path  # 返回保存的路径，方便主循环确认
+
 
 if __name__ == '__main__':
-    # ... (main函数部分的代码完全不变)
     print("Initializing NuScenes SDK...")
     nusc = NuScenes(version=NUSCENES_VERSION, dataroot=NUSCENES_DATAROOT, verbose=False)
     print("SDK initialized.")
@@ -96,10 +113,33 @@ if __name__ == '__main__':
     for scene_name, events_in_scene in all_events_by_scene.items():
         all_events_flat.extend(events_in_scene)
     print(f"Found a total of {len(all_events_flat)} events to visualize.")
+
+    # --- 修改主循环，增加更详细的反馈 ---
+    events_processed = 0
+    events_saved = 0
     for event in tqdm(all_events_flat, desc="Visualizing Events"):
         try:
-            visualize_event(nusc, event, OUTPUT_DIR)
+            # 增加一个计时器来了解处理速度
+            event_start_time = time.time()
+
+            saved_path = visualize_event(nusc, event, OUTPUT_DIR)
+
+            event_duration = time.time() - event_start_time
+            events_processed += 1
+
+            # 只有当visualize_event成功返回路径时，才确认保存成功
+            if saved_path:
+                events_saved += 1
+                # 使用tqdm.write来打印，避免与进度条冲突
+                tqdm.write(f"Event {event['event_id']} processed and saved in {event_duration:.2f}s.")
+
         except Exception as e:
-            # print(f"\nError processing event {event.get('event_id', 'N/A')}: {e}")
+            # [关键修复] 取消注释并打印错误！
+            tqdm.write(f"\n[ERROR] Failed to process event {event.get('event_id', 'N/A')}: {e}")
+            # 记录失败的事件，但不中断整个过程
+            events_processed += 1
             continue
+
     print("\nVisualization complete!")
+    print(f"Total events attempted: {events_processed}")
+    print(f"Total events successfully saved: {events_saved}")
