@@ -398,6 +398,7 @@ def get_agent_state_at_timestamp(nusc, scene, instance_token, target_timestamp):
 
     if best_ann:
         box = Box(best_ann['translation'], best_ann['size'], Quaternion(best_ann['rotation']))
+        print("box.token={}", box.token)
         velocity = nusc.box_velocity(box.token)[:2]
         return {
             'pos': box.center[:2],
