@@ -13,44 +13,36 @@ NUSCENES_VERSION = 'v1.0-trainval'            # 使用的数据集版本 ('v1.0-
 EVENTS_JSON_PATH = 'result.json' # 你生成的事件JSON文件
 OUTPUT_DIR = '/data0/senzeyu2/dataset/nuscenes/events'         # 保存可视化结果的文件夹
 
-PRIMARY_AGENT_COLOR = (1, 0, 0) # 红色
-INTERACTING_AGENT_COLOR = (0, 0, 1) # 蓝色
-
+PRIMARY_AGENT_COLOR = (1, 0, 0)
+INTERACTING_AGENT_COLOR = (0, 0, 1)
 
 def find_closest_sample(nusc, scene_token, target_timestamp):
-    """在场景中找到最接近目标时间戳的样本(sample)"""
+    # ... (代码不变)
     scene = nusc.get('scene', scene_token)
     current_sample_token = scene['first_sample_token']
-
     min_time_diff = float('inf')
     closest_sample_token = current_sample_token
-
     while current_sample_token:
         sample = nusc.get('sample', current_sample_token)
         time_diff = abs(sample['timestamp'] / 1e6 - target_timestamp)
-
         if time_diff < min_time_diff:
             min_time_diff = time_diff
             closest_sample_token = current_sample_token
-
         current_sample_token = sample['next']
-        # 优化：如果时间差开始变大，可以提前退出
         if time_diff > min_time_diff + 0.1:
             break
-
     return nusc.get('sample', closest_sample_token)
 
-
 def get_annotation_for_instance(nusc, sample, instance_token):
-    """在给定的样本中查找特定实例(instance)的标注(annotation)"""
+    # ... (代码不变)
     for ann_token in sample['anns']:
         ann = nusc.get('sample_annotation', ann_token)
         if ann['instance_token'] == instance_token:
             return ann
     return None
 
-
 def visualize_event(nusc, event_data, output_dir):
+    # ... (代码不变)
     event_id = event_data['event_id']
     scene_token = event_id.split('_')[0]
     event_timestamp = event_data['timestamp_start']
@@ -87,8 +79,8 @@ def visualize_event(nusc, event_data, output_dir):
     plt.savefig(output_path)
     plt.close(fig)
 
-
 if __name__ == '__main__':
+    # ... (main函数部分的代码完全不变)
     print("Initializing NuScenes SDK...")
     nusc = NuScenes(version=NUSCENES_VERSION, dataroot=NUSCENES_DATAROOT, verbose=False)
     print("SDK initialized.")
