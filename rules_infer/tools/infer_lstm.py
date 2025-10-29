@@ -5,6 +5,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 # 确保 nuscenes-devkit 和其他库已安装
 from nuscenes.nuscenes import NuScenes
+from nuscenes.utils.splits import create_splits_scenes
 from nuscenes.map_expansion.map_api import NuScenesMap
 from collections import defaultdict
 import numpy as np
@@ -48,260 +49,154 @@ CONFIG = {
     # 保存最终索引文件的路径
     'critical_event_index_file': 'critical_events.json'
 }
+# --- 配置参数 ---
+NUSCENES_PATH = '/path/to/your/nuscenes'  # 修改为你的nuscenes数据集路径
+NUSCENES_VERSION = 'v1.0-mini'  # 或 'v1.0-trainval'
+MODEL_PATH = 'trajectory_lstm.pth'
+OUTPUT_JSON_PATH = 'social_events_with_humans.json'  # 新的输出文件名
+
+# 事件检测参数
+HIST_LEN = 8
+PRED_LEN = 12
+FDE_THRESHOLD = 2.0  # 对于行人，这个阈值可能需要调整
+INTERACTION_RADIUS = 30.0
 
 
-def get_agent_history_and_future(instance_token, start_sample, nusc, hist_len, future_len):
-    history_xy, future_xy = np.zeros((hist_len, 2)), np.zeros((future_len, 2))
-    try:
-        current_ann = next(ann for ann in nusc.get('sample', start_sample)['anns'] if
-                           nusc.get('sample_annotation', ann)['instance_token'] == instance_token)
-    except StopIteration:
-        return None, None  # Instance not in this sample
-
-    # Get history
-    current_ann_record = nusc.get('sample_annotation', current_ann)
-    for i in range(hist_len - 1, -1, -1):
-        history_xy[i] = current_ann_record['translation'][:2]
-        if not current_ann_record['prev']: return None, None
-        current_ann_record = nusc.get('sample_annotation', current_ann_record['prev'])
-
-    # Reset to start and get future
-    current_ann_record = nusc.get('sample_annotation', current_ann)
-    for i in range(future_len):
-        if not current_ann_record['next']: return None, None
-        current_ann_record = nusc.get('sample_annotation', current_ann_record['next'])
-        future_xy[i] = current_ann_record['translation'][:2]
-    return history_xy, future_xy
-
-
-def transform_to_agent_centric(points, anchor_xy, anchor_yaw):
-    rotation_matrix = np.array([[np.cos(anchor_yaw), -np.sin(anchor_yaw)], [np.sin(anchor_yaw), np.cos(anchor_yaw)]])
-    return (points - anchor_xy) @ rotation_matrix.T
-
-
-def transform_to_global(points, anchor_xy, anchor_yaw):
-    rotation_matrix = np.array([[np.cos(anchor_yaw), -np.sin(anchor_yaw)], [np.sin(anchor_yaw), np.cos(anchor_yaw)]])
-    return points @ rotation_matrix + anchor_xy
-
-
-def get_heading_from_history(history_xy):
-    if np.all(history_xy[-1] == history_xy[-2]): return 0.0
-    return np.arctan2(history_xy[-1, 1] - history_xy[-2, 1], history_xy[-1, 0] - history_xy[-2, 0])
-
-
-class InteractionDetector:
-    def __init__(self, model, device, nusc, config):
-        self.model = model
-        self.device = device
-        self.nusc = nusc
-        self.config = config
-        self.model.eval()
-
-    def detect_events_in_scene(self, scene_token):
-        scene = self.nusc.get('scene', scene_token)
-        samples = []
-        current_token = scene['first_sample_token']
-        while current_token:
-            samples.append(current_token)
-            current_token = self.nusc.get('sample', current_token)['next']
-
-        agent_event_tracker = {}
-        detected_events = []
-
-        for frame_idx, sample_token in enumerate(samples):
-            sample = self.nusc.get('sample', sample_token)
-
-            for ann_token in sample['anns']:
-                ann = self.nusc.get('sample_annotation', ann_token)
-                instance_token = ann['instance_token']
-                if 'vehicle' not in ann['category_name']: continue
-
-                history, future_gt = get_agent_history_and_future(
-                    instance_token, sample_token, self.nusc,
-                    self.config['hist_len'], self.config['future_len']
-                )
-                if history is None or future_gt is None: continue
-
-                anchor_xy, anchor_yaw = history[-1], get_heading_from_history(history)
-                history_centric = transform_to_agent_centric(history, anchor_xy, anchor_yaw)
-                history_tensor = torch.FloatTensor(history_centric).unsqueeze(0).to(self.device)
-
-                with torch.no_grad():
-                    future_pred_centric = self.model(history_tensor, self.config['future_len']).squeeze(0).cpu().numpy()
-
-                future_pred_global = transform_to_global(future_pred_centric, anchor_xy, anchor_yaw)
-                fde = np.linalg.norm(future_pred_global[-1] - future_gt[-1])
-
-                if instance_token not in agent_event_tracker:
-                    agent_event_tracker[instance_token] = {'is_event': False, 'start_frame_idx': -1, 'peak_error': 0,
-                                                           'peak_frame_idx': -1}
-
-                tracker = agent_event_tracker[instance_token]
-
-                if fde > self.config['error_threshold_m']:
-                    if not tracker['is_event']:
-                        tracker.update({'is_event': True, 'start_frame_idx': frame_idx, 'peak_error': fde,
-                                        'peak_frame_idx': frame_idx})
-                    elif fde > tracker['peak_error']:
-                        tracker.update({'peak_error': fde, 'peak_frame_idx': frame_idx})
-                else:
-                    if tracker['is_event']:
-                        end_idx = frame_idx - 1
-                        if end_idx - tracker['start_frame_idx'] + 1 >= self.config['min_event_frames']:
-                            peak_sample_token = samples[tracker['peak_frame_idx']]
-                            interacting_agents = self._find_interacting_agents(instance_token, peak_sample_token)
-                            detected_events.append({
-                                'key_agent_token': instance_token,
-                                'interacting_agent_tokens': interacting_agents,
-                                'start_frame_idx': tracker['start_frame_idx'],
-                                'end_frame_idx': end_idx,
-                                'peak_error_fde': tracker['peak_error'],
-                                'peak_frame_idx': tracker['peak_frame_idx'],
-                                'peak_sample_token': peak_sample_token,  # <<<--- 添加此项用于可视化
-                                'scene_token': scene_token
-                            })
-                        tracker['is_event'] = False
-        return detected_events
-
-    def _find_interacting_agents(self, key_agent_token, peak_sample_token):
-        interacting_tokens = []
-        sample = self.nusc.get('sample', peak_sample_token)
-        key_agent_ann = next(ann for ann in sample['anns'] if
-                             self.nusc.get('sample_annotation', ann)['instance_token'] == key_agent_token)
-        key_agent_pos = np.array(self.nusc.get('sample_annotation', key_agent_ann)['translation'][:2])
-
-        for ann_token in sample['anns']:
-            ann = self.nusc.get('sample_annotation', ann_token)
-            if ann['instance_token'] == key_agent_token: continue
-            distance = np.linalg.norm(key_agent_pos - np.array(ann['translation'][:2]))
-            if distance < self.config['proximity_radius_m']:
-                interacting_tokens.append(ann['instance_token'])
-        return interacting_tokens
-
-
-def visualize_and_save_event(event, nusc, output_path):
-    """为单个事件在误差峰值帧生成并保存可视化图像"""
-    peak_sample_token = event['peak_sample_token']
-    sample_record = nusc.get('sample', peak_sample_token)
-
-    # 准备要绘制的box和颜色
-    boxes_to_draw = []
-    colors_to_draw = []
-
-    for ann_token in sample_record['anns']:
-        ann_record = nusc.get('sample_annotation', ann_token)
-        instance_token = ann_record['instance_token']
-
-        color = None
-        if instance_token == event['key_agent_token']:
-            color = (255, 0, 0)  # 红色 for key agent
-        elif instance_token in event['interacting_agent_tokens']:
-            color = (0, 0, 255)  # 蓝色 for interacting agents
-
-        if color:
-            box = Box(ann_record['translation'], ann_record['size'], Quaternion(ann_record['rotation']))
-            boxes_to_draw.append(box)
-            colors_to_draw.append(color)
-
-    # 定义相机顺序和拼接图像
-    CAMERAS = [
-        'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT',
-        'CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT'
-    ]
-
-    # 渲染每个相机视图
-    images = []
-    for cam in CAMERAS:
-        cam_token = sample_record['data'][cam]
-        # 使用 extra_boxes 参数来绘制我们自定义的框
-        # with_anns=False 确保不绘制默认的 nuScenes 标注
-        img_path, _, _ = nusc.get_sample_data(cam_token, box_vis_level=0)
-        img = Image.open(img_path)
-        nusc.render_boxes_on_image(img, boxes_to_draw, colors=colors_to_draw)
-        images.append(img)
-
-    # 拼接图像
-    width, height = images[0].size
-    stitched_image = Image.new('RGB', (width * 3, height * 2))
-
-    for i, img in enumerate(images):
-        row = i // 3
-        col = i % 3
-        stitched_image.paste(img, (col * width, row * height))
-
-    # 保存图像
-    stitched_image.save(output_path)
-    # print(f"Saved visualization to {output_path}")
-
-
-if __name__ == '__main__':
-    # --- 配置参数 ---
-    DATAROOT = '/data0/senzeyu2/dataset/nuscenes'  # <<<--- 修改为你的nuScenes路径
-    VERSION = 'v1.0-trainval'  # 或 'v1.0-trainval'
-    MODEL_PATH = 'seq2seq_model.pth'  # <<<--- 假设你已经训练好并保存了模型
-    OUTPUT_DIR = '/data0/senzeyu2/dataset/nuscenes/critical'  # <<<--- 输出目录
-
-    config = {
-        'hist_len': 8,
-        'future_len': 12,
-        'error_threshold_m': 3.0,
-        'proximity_radius_m': 20.0,
-        'min_event_frames': 5
-    }
-
-    # --- 初始化 ---
+def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
 
-    nusc = NuScenes(version=VERSION, dataroot=DATAROOT, verbose=False)
+    # 1. 加载模型
+    model = TrajectoryLSTM(pred_len=PRED_LEN).to(device)
+    model.load_state_dict(torch.load(MODEL_PATH, map_location=device))
+    model.eval()
 
-    # --- 加载模型 ---
-    encoder = Encoder()
-    decoder = Decoder()
-    model = Seq2Seq(encoder, decoder, device).to(device)
+    # 2. 加载NuScenes
+    nusc = NuScenes(version=NUSCENES_VERSION, dataroot=NUSCENES_PATH, verbose=True)
 
-    if os.path.exists(MODEL_PATH):
-        print(f"Loading pre-trained model from {MODEL_PATH}")
-        model.load_state_dict(torch.load(MODEL_PATH))
-    else:
-        print(f"Warning: Model file {MODEL_PATH} not found. Using randomly initialized model.")
+    if NUSCENES_VERSION == 'v1.0-mini':
+        eval_split_name = 'mini_val'
+    else:  # 'v1.0-trainval'
+        eval_split_name = 'val'
+    scenes_for_split = create_splits_scenes()[eval_split_name]
+    # 3. 遍历场景检测事件
+    all_events = []
+    scenes_to_process = [s for s in nusc.scene if s['name'] in scenes_for_split]
+    for scene in tqdm(scenes_to_process, desc="Processing Scenes"):
+        instance_trajs = get_trajectories_for_scene(nusc, scene)
 
-    # --- 创建输出目录 ---
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+        for main_agent_token, traj_data in instance_trajs.items():
+            is_in_event = False
+            current_event = {}
+            sorted_frames = sorted(traj_data.keys())
 
-    # --- 创建检测器并处理所有场景 ---
-    detector = InteractionDetector(model, device, nusc, config)
+            if len(sorted_frames) < HIST_LEN + PRED_LEN:
+                continue
 
-    total_events_found = 0
-    for scene_idx, scene in enumerate(tqdm(nusc.scene, desc="Processing Scenes")):
-        scene_token = scene['token']
-        scene_name = scene['name']
+            for i in range(len(sorted_frames) - (HIST_LEN + PRED_LEN) + 1):
+                frame_idx = sorted_frames[i + HIST_LEN - 1]
+                history_frames = sorted_frames[i: i + HIST_LEN]
+                future_gt_frames = sorted_frames[i + HIST_LEN: i + HIST_LEN + PRED_LEN]
+                history_pos = np.array([traj_data[f]['pos'] for f in history_frames], dtype=np.float32)
+                future_gt_pos = np.array([traj_data[f]['pos'] for f in future_gt_frames], dtype=np.float32)
 
-        events = detector.detect_events_in_scene(scene_token)
+                origin = history_pos[-1].copy()
+                history_norm = torch.from_numpy(history_pos - origin).unsqueeze(0).to(device)
 
-        if not events:
+                with torch.no_grad():
+                    future_pred_norm = model(history_norm)
+                future_pred_pos = future_pred_norm.squeeze(0).cpu().numpy() + origin
+
+                fde = np.linalg.norm(future_pred_pos[-1] - future_gt_pos[-1])
+
+                if fde > FDE_THRESHOLD and not is_in_event:
+                    is_in_event = True
+                    current_event = {
+                        "scene_token": scene['token'],
+                        "main_agent_token": main_agent_token,
+                        "start_frame": frame_idx
+                    }
+                elif fde <= FDE_THRESHOLD and is_in_event:
+                    is_in_event = False
+                    current_event["end_frame"] = frame_idx - 1
+                    start_sample_token = traj_data[current_event['start_frame']]['sample_token']
+                    interacting_agents = find_interacting_agents(
+                        nusc, start_sample_token, main_agent_token,
+                        traj_data[current_event['start_frame']]['pos'],
+                        INTERACTION_RADIUS
+                    )
+                    current_event["interacting_agent_tokens"] = interacting_agents
+                    all_events.append(current_event)
+
+            if is_in_event:
+                current_event["end_frame"] = sorted_frames[-1]
+                start_sample_token = traj_data[current_event['start_frame']]['sample_token']
+                interacting_agents = find_interacting_agents(
+                    nusc, start_sample_token, main_agent_token,
+                    traj_data[current_event['start_frame']]['pos'],
+                    INTERACTION_RADIUS
+                )
+                current_event["interacting_agent_tokens"] = interacting_agents
+                all_events.append(current_event)
+
+    with open(OUTPUT_JSON_PATH, 'w') as f:
+        json.dump(all_events, f, indent=4)
+    print(f"Detected {len(all_events)} events. Saved to {OUTPUT_JSON_PATH}")
+
+
+def get_trajectories_for_scene(nusc, scene):
+    trajs = {}
+    current_token = scene['first_sample_token']
+    frame_idx = 0
+    while current_token != "":
+        sample = nusc.get('sample', current_token)
+        for ann_token in sample['anns']:
+            ann = nusc.get('sample_annotation', ann_token)
+
+            # --- MODIFICATION START ---
+            is_vehicle = ann['category_name'].startswith('vehicle')
+            is_human = ann['category_name'].startswith('human')
+
+            if is_vehicle or is_human:
+                # --- MODIFICATION END ---
+                inst_token = ann['instance_token']
+                if inst_token not in trajs:
+                    trajs[inst_token] = {}
+                trajs[inst_token][frame_idx] = {
+                    'pos': ann['translation'][:2],
+                    'sample_token': current_token
+                }
+        current_token = sample['next']
+        frame_idx += 1
+    return trajs
+
+
+def find_interacting_agents(nusc, sample_token, main_agent_token, main_agent_pos, radius):
+    interacting_agents = []
+    sample = nusc.get('sample', sample_token)
+    for ann_token in sample['anns']:
+        ann = nusc.get('sample_annotation', ann_token)
+        inst_token = ann['instance_token']
+
+        if inst_token == main_agent_token:
             continue
 
-        total_events_found += len(events)
+        # --- MODIFICATION START ---
+        is_vehicle = ann['category_name'].startswith('vehicle')
+        is_human = ann['category_name'].startswith('human')
 
-        # 为当前场景创建子目录
-        scene_output_dir = os.path.join(OUTPUT_DIR, scene_name)
-        os.makedirs(scene_output_dir, exist_ok=True)
+        if not (is_vehicle or is_human):
+            continue
+        # --- MODIFICATION END ---
 
-        for event_idx, event in enumerate(events):
-            # 构造文件名
-            output_filename = f"event_{event_idx + 1}_peak_frame_{event['peak_frame_idx']}.png"
-            output_path = os.path.join(scene_output_dir, output_filename)
+        other_pos = ann['translation'][:2]
+        distance = np.linalg.norm(np.array(main_agent_pos) - np.array(other_pos))
 
-            # 生成并保存可视化
-            visualize_and_save_event(event, nusc, output_path)
+        if distance < radius:
+            interacting_agents.append(inst_token)
 
-            # 打印事件信息 (可选)
-            # print(f"\n--- Detected Event in Scene {scene_name} ---")
-            # print(f"  Key Agent: {event['key_agent_token']}")
-            # print(f"  Interacting Agents: {event['interacting_agent_tokens']}")
-            # print(f"  Saved to: {output_path}")
+    return interacting_agents
 
-    print(f"\nProcessing complete. Found a total of {total_events_found} potential interaction events.")
-    print(f"Visualizations saved in '{OUTPUT_DIR}' directory.")
 
+if __name__ == '__main__':
+    main()
