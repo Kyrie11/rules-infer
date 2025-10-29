@@ -335,20 +335,43 @@ class SocialInteractionDetector:
         return detected_events
 
 
+class Config:
+    # --- 数据集与路径 ---
+    # !!! 修改为你的nuScenes数据集根目录 !!!
+    NUSCENES_DATA_ROOT = '/data/sets/nuscenes'
+    NUSCENES_VERSION = 'v1.0-mini'  # 使用mini数据集进行快速演示
+
+    # --- 模型与训练参数 ---
+    HIST_LEN = 8  # 历史轨迹长度 (N_in)
+    PRED_LEN = 12  # 预测轨迹长度 (N_out)
+    INPUT_DIM = 2  # 输入特征维度 (x, y)
+    OUTPUT_DIM = 2  # 输出特征维度 (x, y)
+    BATCH_SIZE = 64
+    LEARNING_RATE = 0.001
+    NUM_EPOCHS = 20  # 演示目的，实际可增加
+    MODEL_SAVE_PATH = 'trajectory_lstm.pth'
+
+    # --- 事件检测与分析参数 ---
+    FDE_THRESHOLD_M = 2.0  # 最终位移误差的绝对阈值（米）
+    FDE_VEL_MULTIPLIER = 1.5  # FDE的相对阈值，FDE > 速度 * 这个乘数
+    TTC_THRESHOLD_S = 4.0  # 触发交互分析的碰撞时间阈值（秒）
+
+
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     # 1. 配置参数
-    CONFIG = {
-        'HIST_LEN': 10,  # 历史轨迹长度 (2秒 @ 5Hz)
-        'PRED_LEN': 12,  # 预测轨迹长度 (2.4秒 @ 5Hz)
-        'INPUT_DIM': 2,  # 输入维度 (x, y)
-        'OUTPUT_DIM': 2,  # 输出维度 (x, y)
-        'THRESHOLDS': {
-            'FDE': 3.0,  # Final Displacement Error 阈值 (米)
-            'LONG_VEL_ERROR': 2.0  # 纵向速度误差阈值 (米/秒), 表示明显的加减速
-        }
-    }
+    # CONFIG = {
+    #     'HIST_LEN': 10,  # 历史轨迹长度 (2秒 @ 5Hz)
+    #     'PRED_LEN': 12,  # 预测轨迹长度 (2.4秒 @ 5Hz)
+    #     'INPUT_DIM': 2,  # 输入维度 (x, y)
+    #     'OUTPUT_DIM': 2,  # 输出维度 (x, y)
+    #     'THRESHOLDS': {
+    #         'FDE': 3.0,  # Final Displacement Error 阈值 (米)
+    #         'LONG_VEL_ERROR': 2.0  # 纵向速度误差阈值 (米/秒), 表示明显的加减速
+    #     }
+    # }
 
+    cfg = Config()
     OUTPUT_JSON_PATH = "result.json"
     # 2. 初始化nuScenes SDK
     # 请修改为你自己的路径
@@ -356,7 +379,7 @@ if __name__ == '__main__':
 
     # 3. 加载你预训练的LSTM模型
     # 这里我们创建一个假的模型并加载一个虚拟的权重，你需要替换成你自己的
-    model = TrajectoryLSTM(CONFIG)
+    model = TrajectoryLSTM(cfg)
     try:
         # 替换 'trajectory_lstm.pth' 为你的模型文件
         model.load_state_dict(torch.load('trajectory_lstm.pth', map_location=device))
