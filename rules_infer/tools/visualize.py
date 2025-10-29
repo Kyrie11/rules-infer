@@ -1,18 +1,16 @@
 import os
 import json
+import time  # 导入time模块用于诊断
+
 import matplotlib
 
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import time
-from nuscenes.nuscenes import NuScenes
-# [新] 导入 NuScenesExplorer
-from nuscenes.utils.data_classes import Box
-from pyquaternion import Quaternion
-import numpy as np
 
-# ... (配置区保持不变) ...
+from nuscenes.nuscenes import NuScenes
+
+# ... (你的配置和未修改的函数保持不变) ...
 NUSCENES_DATAROOT = '/data0/senzeyu2/dataset/nuscenes'
 NUSCENES_VERSION = 'v1.0-trainval'
 EVENTS_JSON_PATH = 'result.json'
@@ -21,8 +19,8 @@ PRIMARY_AGENT_COLOR = (1, 0, 0)
 INTERACTING_AGENT_COLOR = (0, 0, 1)
 
 
-# ... (find_closest_sample 和 get_annotation_for_instance 函数保持不变) ...
 def find_closest_sample(nusc, scene_token, target_timestamp):
+    # ... (代码不变)
     scene = nusc.get('scene', scene_token)
     current_sample_token = scene['first_sample_token']
     min_time_diff = float('inf')
@@ -39,29 +37,33 @@ def find_closest_sample(nusc, scene_token, target_timestamp):
 
 
 def get_annotation_for_instance(nusc, sample, instance_token):
+    # ... (代码不变)
     for ann_token in sample['anns']:
         ann = nusc.get('sample_annotation', ann_token)
         if ann['instance_token'] == instance_token: return ann
     return None
 
 
-# --- [核心修改] 修改 visualize_event 函数 ---
+# --- 修改 visualize_event 函数，增加诊断信息 ---
 def visualize_event(nusc, event_data, output_dir):
     event_id = event_data['event_id']
+    # [诊断] 在函数开始时打印信息
+    # print(f"  - Starting visualization for event: {event_id}")
+
+    # ... (前面的数据准备代码不变) ...
     scene_token = event_id.split('_')[0]
     event_timestamp = event_data['timestamp_start']
     primary_agent_instance = event_data['primary_agent']['agent_id']
     interacting_agents_instances = [agent['agent_id'] for agent in
                                     event_data.get('candidate_interacting_agents', [])[:2]]
-
     sample = find_closest_sample(nusc, scene_token, event_timestamp)
     primary_ann = get_annotation_for_instance(nusc, sample, primary_agent_instance)
     interacting_anns = [get_annotation_for_instance(nusc, sample, inst) for inst in interacting_agents_instances]
     interacting_anns = [ann for ann in interacting_anns if ann is not None]
 
     if not primary_ann:
-        print(f"Warning: Primary agent for event {event_id} not found in closest sample. Skipping.")
-        return None
+        # [诊断] 让错误更明确
+        raise ValueError(f"Could not find primary agent annotation for event {event_id}")
 
     fig, axes = plt.subplots(2, 3, figsize=(24, 12), dpi=100)
     axes = axes.ravel()
@@ -70,55 +72,31 @@ def visualize_event(nusc, event_data, output_dir):
     for i, cam_type in enumerate(cam_types):
         ax = axes[i]
         cam_token = sample['data'][cam_type]
-        cam_data = nusc.get('sample_data', cam_token)
-
-        # 1. 渲染背景图像
         nusc.render_sample_data(cam_token, with_anns=False, ax=ax)
-
-        # 2. 手动将3D Box投影并渲染到2D图像上
-        cs_record = nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
-        pose_record = nusc.get('ego_pose', cam_data['ego_pose_token'])
-        cam_intrinsic = np.array(cs_record['camera_intrinsic'])
-
-        def render_annotation_on_ax(ann, color, line_width):
-            box = nusc.get_box(ann['token'])
-
-            # --- 坐标系转换 (保持不变) ---
-            box.translate(-np.array(pose_record['translation']))
-            box.rotate(Quaternion(pose_record['rotation']).inverse)
-            box.translate(-np.array(cs_record['translation']))
-            box.rotate(Quaternion(cs_record['rotation']).inverse)
-
-            # [修正] 替换掉不存在的 'in_camera_front' 方法
-            # 手动检查Box是否在相机前方
-            # 获取Box在当前相机坐标系下的8个角点
-            corners_3d = box.corners()
-            # 如果任何一个角点的z坐标 > 0，则它在相机前方
-            # corners_3d 是一个 3x8 的矩阵 (x, y, z for 8 corners)
-            # 我们检查第三行（索引为2）
-            if np.any(corners_3d[2, :] > 0):
-                box.render(ax, view=cam_intrinsic, normalize=True, colors=(color, color, color), linewidth=line_width)
-
-        # 渲染 Primary Agent (红色)
-        render_annotation_on_ax(primary_ann, PRIMARY_AGENT_COLOR, 3)
-
-        # 渲染 Interacting Agents (蓝色)
+        nusc.render_annotation(primary_ann['token'], ax=ax, box_vis_level=3, color=PRIMARY_AGENT_COLOR, linewidth=3)
         for ann in interacting_anns:
-            render_annotation_on_ax(ann, INTERACTING_AGENT_COLOR, 2)
-
+            nusc.render_annotation(ann['token'], ax=ax, box_vis_level=3, color=INTERACTING_AGENT_COLOR, linewidth=2)
         ax.set_title(cam_type.replace('_', ' '))
         ax.set_axis_off()
 
     fig.suptitle(f'Event: {event_id}\n(Primary: Red, Interacting: Blue)', fontsize=20)
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+
     output_path = os.path.join(output_dir, f"{event_id}.png")
+
+    # [诊断] 在保存前后都打印信息
+    # print(f"    - Attempting to save to: {output_path}")
+    save_start_time = time.time()
+
     plt.savefig(output_path)
+
+    save_duration = time.time() - save_start_time
+    # print(f"    - Save command finished in {save_duration:.2f} seconds.")
+
     plt.close(fig)
+    return output_path  # 返回保存的路径，方便主循环确认
 
-    return output_path
 
-
-# 在主函数中也要做相应修改
 if __name__ == '__main__':
     print("Initializing NuScenes SDK...")
     nusc = NuScenes(version=NUSCENES_VERSION, dataroot=NUSCENES_DATAROOT, verbose=False)
