@@ -5,10 +5,9 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-
+import time
 from nuscenes.nuscenes import NuScenes
 # [新] 导入 NuScenesExplorer
-from nuscenes.explorer import NuScenesExplorer
 from nuscenes.utils.data_classes import Box
 from pyquaternion import Quaternion
 
@@ -46,7 +45,7 @@ def get_annotation_for_instance(nusc, sample, instance_token):
 
 
 # --- [核心修改] 修改 visualize_event 函数 ---
-def visualize_event(nusc, nusc_explorer, event_data, output_dir):
+def visualize_event(nusc, event_data, output_dir):  # <--- 不再需要 nusc_explorer
     event_id = event_data['event_id']
     scene_token = event_id.split('_')[0]
     event_timestamp = event_data['timestamp_start']
@@ -70,28 +69,18 @@ def visualize_event(nusc, nusc_explorer, event_data, output_dir):
         ax = axes[i]
         cam_token = sample['data'][cam_type]
 
-        # 1. 渲染背景图像 (不变)
+        # 1. 渲染背景图像
         nusc.render_sample_data(cam_token, with_anns=False, ax=ax)
 
-        # 2. [核心修改] 使用 nusc_explorer.render_box 来绘制包围盒
-        # 获取相机内参和外参，这是 render_box 需要的
-        cam_data = nusc.get('sample_data', cam_token)
-        cs_record = nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
-        pose_record = nusc.get('ego_pose', cam_data['ego_pose_token'])
+        # 2. [核心修改] 使用 nusc.render_annotation 来绘制包围盒
 
         # 绘制 Primary Agent (红色)
-        box = nusc.get_box(primary_ann['token'])
-        nusc_explorer.render_box(ax, box, view=cs_record['camera_intrinsic'],
-                                 normalize=True, colors=(PRIMARY_AGENT_COLOR, PRIMARY_AGENT_COLOR, PRIMARY_AGENT_COLOR),
-                                 linewidth=3)
+        # nusc.render_annotation 需要的是 annotation token
+        nusc.render_annotation(primary_ann['token'], ax=ax, box_color=PRIMARY_AGENT_COLOR, linewidth=3)
 
         # 绘制 Interacting Agents (蓝色)
         for ann in interacting_anns:
-            box = nusc.get_box(ann['token'])
-            nusc_explorer.render_box(ax, box, view=cs_record['camera_intrinsic'],
-                                     normalize=True,
-                                     colors=(INTERACTING_AGENT_COLOR, INTERACTING_AGENT_COLOR, INTERACTING_AGENT_COLOR),
-                                     linewidth=2)
+            nusc.render_annotation(ann['token'], ax=ax, box_color=INTERACTING_AGENT_COLOR, linewidth=2)
 
         ax.set_title(cam_type.replace('_', ' '))
         ax.set_axis_off()
@@ -103,14 +92,11 @@ def visualize_event(nusc, nusc_explorer, event_data, output_dir):
     plt.close(fig)
 
 
+# 在主函数中也要做相应修改
 if __name__ == '__main__':
     print("Initializing NuScenes SDK...")
     nusc = NuScenes(version=NUSCENES_VERSION, dataroot=NUSCENES_DATAROOT, verbose=False)
-    # [新] 创建一个 NuScenesExplorer 实例
-    nusc_explorer = NuScenesExplorer(nusc)
-    print("SDK and Explorer initialized.")
-
-    # ... (加载JSON和创建目录的代码不变) ...
+    print("SDK initialized.")
     print(f"Loading events from '{EVENTS_JSON_PATH}'...")
     if not os.path.exists(EVENTS_JSON_PATH):
         print(f"Error: Events file not found at '{EVENTS_JSON_PATH}'")
@@ -119,18 +105,37 @@ if __name__ == '__main__':
         all_events_by_scene = json.load(f)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     print(f"Visualization results will be saved in '{OUTPUT_DIR}/'")
-
     all_events_flat = []
     for scene_name, events_in_scene in all_events_by_scene.items():
         all_events_flat.extend(events_in_scene)
     print(f"Found a total of {len(all_events_flat)} events to visualize.")
 
+    # --- 修改主循环，增加更详细的反馈 ---
+    events_processed = 0
+    events_saved = 0
     for event in tqdm(all_events_flat, desc="Visualizing Events"):
         try:
-            # [新] 将 nusc_explorer 实例传递给可视化函数
-            visualize_event(nusc, nusc_explorer, event, OUTPUT_DIR)
+            # 增加一个计时器来了解处理速度
+            event_start_time = time.time()
+
+            saved_path = visualize_event(nusc, event, OUTPUT_DIR)
+
+            event_duration = time.time() - event_start_time
+            events_processed += 1
+
+            # 只有当visualize_event成功返回路径时，才确认保存成功
+            if saved_path:
+                events_saved += 1
+                # 使用tqdm.write来打印，避免与进度条冲突
+                tqdm.write(f"Event {event['event_id']} processed and saved in {event_duration:.2f}s.")
+
         except Exception as e:
+            # [关键修复] 取消注释并打印错误！
             tqdm.write(f"\n[ERROR] Failed to process event {event.get('event_id', 'N/A')}: {e}")
+            # 记录失败的事件，但不中断整个过程
+            events_processed += 1
             continue
 
     print("\nVisualization complete!")
+    print(f"Total events attempted: {events_processed}")
+    print(f"Total events successfully saved: {events_saved}")
