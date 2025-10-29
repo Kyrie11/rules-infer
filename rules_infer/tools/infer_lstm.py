@@ -16,26 +16,34 @@ import math
 
 
 class Config:
-    # --- 数据集与路径 ---
-    # !!! 修改为你的nuScenes数据集根目录 !!!
-    NUSCENES_DATA_ROOT = '/data0/senzeyu2/dataset/nuscenes'
-    NUSCENES_VERSION = 'v1.0-trainval'  # 使用mini数据集进行快速演示
-
-    # --- 模型与训练参数 ---
-    HIST_LEN = 8  # 历史轨迹长度 (N_in)
-    PRED_LEN = 12  # 预测轨迹长度 (N_out)
-    INPUT_DIM = 2  # 输入特征维度 (x, y)
-    OUTPUT_DIM = 2  # 输出特征维度 (x, y)
-    BATCH_SIZE = 64
-    LEARNING_RATE = 0.001
-    NUM_EPOCHS = 20  # 演示目的，实际可增加
+    # --- 路径与数据集 ---
+    NUSCENES_DATA_ROOT = '/data0/senzeyu2/dataset/nuscenes'  # !!! 修改为你的路径 !!!
+    NUSCENES_VERSION = 'v1.0-trainval'
     MODEL_PATH = 'trajectory_lstm.pth'
+    OUTPUT_JSON_PATH = 'social_interaction_events.json'
 
-    # --- 事件检测与分析参数 ---
-    FDE_THRESHOLD_M = 2.0  # 最终位移误差的绝对阈值（米）
-    FDE_VEL_MULTIPLIER = 1.5  # FDE的相对阈值，FDE > 速度 * 这个乘数
-    TTC_THRESHOLD_S = 4.0  # 触发交互分析的碰撞时间阈值（秒）
+    # --- 模型参数 ---
+    HIST_LEN = 8
+    PRED_LEN = 12
 
+    # --- 事件触发阈值 (L1) ---
+    FDE_THRESHOLD_ABS = 2.5  # 绝对FDE阈值 (米)
+    FDE_THRESHOLD_REL_FACTOR = 1.5  # 相对FDE阈值: FDE > speed * factor
+
+    # --- 事件分析阈值 (L2 & L3) ---
+    JERK_THRESHOLD = 8.0  # 急动度阈值 (m/s^3)
+    YAW_RATE_THRESHOLD = 0.4  # 偏航率阈值 (rad/s, 约23度/秒)
+    TTC_THRESHOLD = 4.0  # 碰撞时间阈值 (秒)
+    THW_THRESHOLD_FOLLOW = 2.5  # 跟车时距阈值 (秒)
+
+    # --- 影响区域定义 (Zone of Influence) ---
+    INTERACTION_ZONE_FORWARD = 50.0  # 前方 (米)
+    INTERACTION_ZONE_BACKWARD = 10.0  # 后方 (米)
+    INTERACTION_ZONE_LATERAL = 5.0  # 两侧 (米, 约一个半车道)
+
+    # --- 时间窗口 ---
+    SAMPLE_INTERVAL_S = 0.5  # nuScenes采样间隔约0.5秒
+    KINEMATICS_WINDOW_SIZE = 5  # 用于计算Jerk的点数 (中心点+/-2)
 
 class EventAnalyzer:
     """
