@@ -1,14 +1,18 @@
 import os
 import json
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import time
 from nuscenes.nuscenes import NuScenes
+# [新] 导入 NuScenesExplorer
 from nuscenes.utils.data_classes import Box
 from pyquaternion import Quaternion
+import numpy as np
 
+# ... (配置区保持不变) ...
 NUSCENES_DATAROOT = '/data0/senzeyu2/dataset/nuscenes'
 NUSCENES_VERSION = 'v1.0-trainval'
 EVENTS_JSON_PATH = 'result.json'
@@ -16,7 +20,8 @@ OUTPUT_DIR = '/data0/senzeyu2/dataset/nuscenes/events'
 PRIMARY_AGENT_COLOR = (1, 0, 0)
 INTERACTING_AGENT_COLOR = (0, 0, 1)
 
-# Find closest sample and get annotation for instance functions remain unchanged.
+
+# ... (find_closest_sample 和 get_annotation_for_instance 函数保持不变) ...
 def find_closest_sample(nusc, scene_token, target_timestamp):
     scene = nusc.get('scene', scene_token)
     current_sample_token = scene['first_sample_token']
@@ -40,6 +45,7 @@ def get_annotation_for_instance(nusc, sample, instance_token):
     return None
 
 
+# --- [核心修改] 修改 visualize_event 函数 ---
 def visualize_event(nusc, event_data, output_dir):
     event_id = event_data['event_id']
     scene_token = event_id.split('_')[0]
@@ -54,7 +60,8 @@ def visualize_event(nusc, event_data, output_dir):
     interacting_anns = [ann for ann in interacting_anns if ann is not None]
 
     if not primary_ann:
-        return
+        print(f"Warning: Primary agent for event {event_id} not found in closest sample. Skipping.")
+        return None  # 返回 None 表示没有成功保存
 
     fig, axes = plt.subplots(2, 3, figsize=(24, 12), dpi=100)
     axes = axes.ravel()
@@ -63,16 +70,43 @@ def visualize_event(nusc, event_data, output_dir):
     for i, cam_type in enumerate(cam_types):
         ax = axes[i]
         cam_token = sample['data'][cam_type]
+        cam_data = nusc.get('sample_data', cam_token)
 
-        # Render background image
+        # 1. 渲染背景图像
         nusc.render_sample_data(cam_token, with_anns=False, ax=ax)
 
-        # Render annotations on the same ax (this is where the modification is)
-        nusc.render_annotation(primary_ann['token'], ax=ax, box_color=PRIMARY_AGENT_COLOR, linewidth=3)
+        # 2. [核心修改] 手动将3D Box投影并渲染到2D图像上
 
-        # Render Interacting Agents (blue)
+        # 获取相机内外参用于投影
+        cs_record = nusc.get('calibrated_sensor', cam_data['calibrated_sensor_token'])
+        pose_record = nusc.get('ego_pose', cam_data['ego_pose_token'])
+        cam_intrinsic = np.array(cs_record['camera_intrinsic'])
+
+        # 定义一个内部函数来处理单个包围盒的渲染，避免代码重复
+        def render_annotation_on_ax(ann, color, line_width):
+            # 从 annotation token 创建 Box 对象，它位于世界坐标系
+            box = nusc.get_box(ann['token'])
+
+            # --- 坐标系转换 ---
+            # 1. 从世界坐标系转换到自车坐标系
+            box.translate(-np.array(pose_record['translation']))
+            box.rotate(Quaternion(pose_record['rotation']).inverse)
+
+            # 2. 从自车坐标系转换到相机坐标系
+            box.translate(-np.array(cs_record['translation']))
+            box.rotate(Quaternion(cs_record['rotation']).inverse)
+
+            # 3. 使用 Box.render() 在指定的ax上绘制，它会处理3D到2D的投影
+            #    注意：box.render()的view参数是相机内参
+            if box.in_camera_front(cam_intrinsic):
+                box.render(ax, view=cam_intrinsic, normalize=True, colors=(color, color, color), linewidth=line_width)
+
+        # 渲染 Primary Agent (红色)
+        render_annotation_on_ax(primary_ann, PRIMARY_AGENT_COLOR, 3)
+
+        # 渲染 Interacting Agents (蓝色)
         for ann in interacting_anns:
-            nusc.render_annotation(ann['token'], ax=ax, box_color=INTERACTING_AGENT_COLOR, linewidth=2)
+            render_annotation_on_ax(ann, INTERACTING_AGENT_COLOR, 2)
 
         ax.set_title(cam_type.replace('_', ' '))
         ax.set_axis_off()
@@ -83,7 +117,10 @@ def visualize_event(nusc, event_data, output_dir):
     plt.savefig(output_path)
     plt.close(fig)
 
+    return output_path  # 返回保存路径，表示成功
 
+
+# 在主函数中也要做相应修改
 if __name__ == '__main__':
     print("Initializing NuScenes SDK...")
     nusc = NuScenes(version=NUSCENES_VERSION, dataroot=NUSCENES_DATAROOT, verbose=False)
@@ -101,10 +138,12 @@ if __name__ == '__main__':
         all_events_flat.extend(events_in_scene)
     print(f"Found a total of {len(all_events_flat)} events to visualize.")
 
+    # --- 修改主循环，增加更详细的反馈 ---
     events_processed = 0
     events_saved = 0
     for event in tqdm(all_events_flat, desc="Visualizing Events"):
         try:
+            # 增加一个计时器来了解处理速度
             event_start_time = time.time()
 
             saved_path = visualize_event(nusc, event, OUTPUT_DIR)
@@ -112,12 +151,16 @@ if __name__ == '__main__':
             event_duration = time.time() - event_start_time
             events_processed += 1
 
+            # 只有当visualize_event成功返回路径时，才确认保存成功
             if saved_path:
                 events_saved += 1
+                # 使用tqdm.write来打印，避免与进度条冲突
                 tqdm.write(f"Event {event['event_id']} processed and saved in {event_duration:.2f}s.")
 
         except Exception as e:
+            # [关键修复] 取消注释并打印错误！
             tqdm.write(f"\n[ERROR] Failed to process event {event.get('event_id', 'N/A')}: {e}")
+            # 记录失败的事件，但不中断整个过程
             events_processed += 1
             continue
 
