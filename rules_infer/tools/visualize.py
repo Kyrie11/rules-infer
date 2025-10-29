@@ -1,188 +1,151 @@
 import os
 import json
-from pathlib import Path
-import cv2
 import numpy as np
+import matplotlib.pyplot as plt
 from tqdm import tqdm
-
-# 确保 nuscenes-devkit 已安装
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.data_classes import Box
+from pyquaternion import Quaternion
 
-CONFIG = {
-    # --- 数据和文件路径 ---
-    'dataroot': '/data0/senzeyu2/dataset/nuscenes/',  # <--- !!! 你的 nuscenes 数据集路径 !!!
-    'version': 'v1.0-trainval',  # <--- !!! 确保与生成json时版本一致 !!!
-    'critical_event_file': 'critical_events.json',  # 你生成的事件索引文件
-    'output_dir': '/data0/senzeyu2/dataset/nuscenes/critical',  # 保存视频帧的总文件夹
-}
+NUSCENES_DATAROOT = '/data0/senzeyu2/dataset/nuscenes' # nuScenes数据集的根目录
+NUSCENES_VERSION = 'v1.0-trainval'            # 使用的数据集版本 ('v1.0-mini' 或 'v1.0-trainval')
+EVENTS_JSON_PATH = 'result.json' # 你生成的事件JSON文件
+OUTPUT_DIR = '/data0/senzeyu2/dataset/nuscenes/events/'         # 保存可视化结果的文件夹
 
-# 定义颜色 (OpenCV使用 BGR 格式)
-COLOR_KEY_AGENT = (0, 0, 255)  # 红色
-COLOR_INTERACTING_AGENT = (255, 0, 0)  # 蓝色
-
-# 定义摄像头顺序用于拼接
-CAM_ORDER = [
-    'CAM_FRONT_LEFT', 'CAM_FRONT', 'CAM_FRONT_RIGHT',
-    'CAM_BACK_LEFT', 'CAM_BACK', 'CAM_BACK_RIGHT'
-]
+PRIMARY_AGENT_COLOR = (1, 0, 0) # 红色
+INTERACTING_AGENT_COLOR = (0, 0, 1) # 蓝色
 
 
-def get_scene_samples(nusc: NuScenes, scene_token: str):
-    """
-    获取一个场景中所有样本(sample)并按时间顺序排列。
-    """
+def find_closest_sample(nusc, scene_token, target_timestamp):
+    """在场景中找到最接近目标时间戳的样本(sample)"""
     scene = nusc.get('scene', scene_token)
-    samples = []
     current_sample_token = scene['first_sample_token']
+
+    min_time_diff = float('inf')
+    closest_sample_token = current_sample_token
+
     while current_sample_token:
         sample = nusc.get('sample', current_sample_token)
-        samples.append(sample)
+        time_diff = abs(sample['timestamp'] / 1e6 - target_timestamp)
+
+        if time_diff < min_time_diff:
+            min_time_diff = time_diff
+            closest_sample_token = current_sample_token
+
         current_sample_token = sample['next']
-    return samples
+        # 优化：如果时间差开始变大，可以提前退出
+        if time_diff > min_time_diff + 0.1:
+            break
+
+    return nusc.get('sample', closest_sample_token)
 
 
-def draw_3d_box(nusc: NuScenes, image: np.ndarray, ann_token: str, color: tuple):
+def get_annotation_for_instance(nusc, sample, instance_token):
+    """在给定的样本中查找特定实例(instance)的标注(annotation)"""
+    for ann_token in sample['anns']:
+        ann = nusc.get('sample_annotation', ann_token)
+        if ann['instance_token'] == instance_token:
+            return ann
+    return None
+
+
+def visualize_event(nusc, event_data, output_dir):
     """
-    在单张相机图像上绘制一个3D边界框。
+    可视化单个事件：拼接6个摄像头视图，并用不同颜色标注 involved agents。
     """
-    # 1. 获取标注记录和相机数据
-    ann_record = nusc.get('sample_annotation', ann_token)
-    sample_data_token = nusc.get('sample', ann_record['sample_token'])['data'][cam_name]
-    cs_record = nusc.get('calibrated_sensor', nusc.get('sample_data', sample_data_token)['calibrated_sensor_token'])
+    # 1. 解析事件信息
+    event_id = event_data['event_id']
+    scene_token = event_id.split('_')[0]
+    event_timestamp = event_data['timestamp_start']
 
-    # 2. 加载3D Box
-    box = nusc.get_box(ann_token)
+    primary_agent_instance = event_data['primary_agent']['agent_id']
+    # 只取交互分数最高的那个作为主要交互对象，避免画面混乱
+    # 如果想标注所有，可以遍历这个列表
+    interacting_agents_instances = [
+        agent['agent_id'] for agent in event_data.get('candidate_interacting_agents', [])[:2]  # 最多标注2个
+    ]
 
-    # 3. 将Box渲染到图像上
-    # nuscenes-devkit > v1.1.9 版本有更方便的 box.render_cv2 方法
-    # 这里使用更通用的方法，手动投影
-    box.render_cv2(image, view=np.array(cs_record['camera_intrinsic']), normalize=True, color=color, thickness=2)
+    # 2. 找到与事件时间最匹配的样本
+    sample = find_closest_sample(nusc, scene_token, event_timestamp)
 
+    # 3. 找到涉及的Agent在当前样本中的具体标注
+    primary_ann = get_annotation_for_instance(nusc, sample, primary_agent_instance)
+    interacting_anns = [
+        get_annotation_for_instance(nusc, sample, inst) for inst in interacting_agents_instances
+    ]
+    interacting_anns = [ann for ann in interacting_anns if ann is not None]  # 过滤掉未找到的
 
-def stitch_six_views(cam_images: dict) -> np.ndarray:
-    """
-    将6个摄像头视图拼接成一个 2x3 的网格图。
-    """
-    # 获取单张图片的尺寸
-    h, w, _ = cam_images['CAM_FRONT'].shape
-
-    # 创建一个空的画布
-    grid_image = np.zeros((2 * h, 3 * w, 3), dtype=np.uint8)
-
-    # 拼接图像
-    grid_image[0:h, 0:w] = cam_images['CAM_FRONT_LEFT']
-    grid_image[0:h, w:2 * w] = cam_images['CAM_FRONT']
-    grid_image[0:h, 2 * w:3 * w] = cam_images['CAM_FRONT_RIGHT']
-    grid_image[h:2 * h, 0:w] = cam_images['CAM_BACK_LEFT']
-    grid_image[h:2 * h, w:2 * w] = cam_images['CAM_BACK']
-    grid_image[h:2 * h, 2 * w:3 * w] = cam_images['CAM_BACK_RIGHT']
-
-    return grid_image
-
-
-def visualize_event(nusc: NuScenes, scene_token: str, event_data: dict, event_idx: int, output_root: Path):
-    """
-    为单个关键事件生成所有帧的可视化结果。
-    """
-    # --- 1. 解析事件数据 ---
-    key_agent_token = event_data['instance_token']
-    start_frame = event_data['start_frame']
-    end_frame = event_data['end_frame']
-    reason = event_data['reason']
-    interactions = event_data['interactions']
-
-    # --- 2. 创建输出目录 ---
-    event_folder_name = f"scene_{nusc.get('scene', scene_token)['name']}_evt{event_idx}_{reason}_{key_agent_token[:6]}"
-    event_output_dir = output_root / event_folder_name
-    event_output_dir.mkdir(exist_ok=True, parents=True)
-    print(f"\nProcessing event: {event_folder_name}")
-
-    # --- 3. 预加载场景的所有样本信息 ---
-    scene_samples = get_scene_samples(nusc, scene_token)
-
-    # --- 4. 逐帧处理和渲染 ---
-    for frame_idx in tqdm(range(start_frame, end_frame), desc="Rendering frames"):
-        if frame_idx >= len(scene_samples):
-            print(f"Warning: frame_idx {frame_idx} is out of bounds for scene {scene_token}. Skipping.")
-            continue
-
-        sample = scene_samples[frame_idx]
-
-        # 建立一个从 instance_token 到当前帧 annotation_token 的快速查找映射
-        inst_to_ann_map = {}
-        for ann_token in sample['anns']:
-            ann = nusc.get('sample_annotation', ann_token)
-            inst_to_ann_map[ann['instance_token']] = ann_token
-
-        # 获取当前帧的交互对象
-        interacting_tokens = interactions.get(str(frame_idx), [])
-
-        cam_images = {}
-        # 渲染6个摄像头视图
-        for cam_name in CAM_ORDER:
-            sample_data_token = sample['data'][cam_name]
-            image_path = nusc.get_sample_data_path(sample_data_token)
-            image = cv2.imread(str(image_path))  # 使用 str() 转换 Path 对象
-
-            # 绘制关键Agent (红色)
-            key_ann_token = inst_to_ann_map.get(key_agent_token)
-            if key_ann_token:
-                nusc.render_annotation_in_image(key_ann_token, image, cam_name, box_color=COLOR_KEY_AGENT)
-
-            # 绘制交互Agent (蓝色)
-            for other_token in interacting_tokens:
-                other_ann_token = inst_to_ann_map.get(other_token)
-                if other_ann_token:
-                    nusc.render_annotation_in_image(other_ann_token, image, cam_name, box_color=COLOR_INTERACTING_AGENT)
-
-            cam_images[cam_name] = image
-
-        # 拼接成大图
-        stitched_image = stitch_six_views(cam_images)
-
-        # 在大图上添加文字信息
-        text_info = f"Scene: {nusc.get('scene', scene_token)['name']} | Frame: {frame_idx} | Event: {reason}"
-        cv2.putText(stitched_image, text_info, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), 3, cv2.LINE_AA)
-        cv2.putText(stitched_image, f"Key Agent (RED): {key_agent_token[:6]}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
-                    COLOR_KEY_AGENT, 2, cv2.LINE_AA)
-
-        # --- 5. 保存当前帧 ---
-        output_frame_path = event_output_dir / f"frame_{frame_idx:04d}.png"
-        cv2.imwrite(str(output_frame_path), stitched_image)
-
-
-def main():
-    print("--- Starting Critical Event Visualization ---")
-
-    # 初始化 NuScenes
-    print(f"Loading NuScenes dataset from {CONFIG['dataroot']}...")
-    nusc = NuScenes(version=CONFIG['version'], dataroot=CONFIG['dataroot'], verbose=False)
-
-    # 加载事件文件
-    event_file = Path(CONFIG['critical_event_file'])
-    if not event_file.exists():
-        print(f"Error: Critical event file not found at {event_file}")
+    if not primary_ann:
+        print(f"Warning: Could not find primary agent annotation for event {event_id} at timestamp {event_timestamp}")
         return
-    with open(event_file, 'r') as f:
-        critical_events = json.load(f)
-    print(f"Loaded {sum(len(v) for v in critical_events.values())} critical events from {event_file}")
 
-    # 创建主输出目录
-    output_root = Path(CONFIG['output_dir'])
-    output_root.mkdir(exist_ok=True)
+    # 4. 准备绘图
+    fig, axes = plt.subplots(2, 3, figsize=(24, 12), dpi=100)
+    axes = axes.ravel()
+    cam_types = [
+        'CAM_FRONT', 'CAM_FRONT_RIGHT', 'CAM_FRONT_LEFT',
+        'CAM_BACK', 'CAM_BACK_RIGHT', 'CAM_BACK_LEFT'
+    ]
 
-    # 遍历所有事件并进行可视化
-    for scene_token, events in critical_events.items():
-        for i, event in enumerate(events):
-            visualize_event(nusc, scene_token, event, i, output_root)
+    for i, cam_type in enumerate(cam_types):
+        ax = axes[i]
+        cam_token = sample['data'][cam_type]
 
-    print("\n--- Visualization process finished! ---")
-    print(f"Results saved in: {output_root.resolve()}")
-    print("\nTo create a video from the image frames, you can use ffmpeg.")
-    print("Example command for one event folder:")
-    print("ffmpeg -framerate 5 -i 'path/to/your/event_folder/frame_%04d.png' -c:v libx264 -pix_fmt yuv420p output.mp4")
+        # 渲染摄像头图像作为背景 (不带任何标注)
+        nusc.render_sample_data(cam_token, with_anns=False, ax=ax)
+
+        # 核心：手动渲染指定颜色的包围盒
+        # Primary Agent (红色)
+        nusc.render_annotation(primary_ann['token'], ax=ax, box_vis_level=3, color=PRIMARY_AGENT_COLOR, linewidth=3)
+
+        # Interacting Agents (蓝色)
+        for ann in interacting_anns:
+            nusc.render_annotation(ann['token'], ax=ax, box_vis_level=3, color=INTERACTING_AGENT_COLOR, linewidth=2)
+
+        ax.set_title(cam_type.replace('_', ' '))
+        ax.set_axis_off()
+
+    # 5. 保存图像
+    fig.suptitle(f'Event: {event_id}\n(Primary: Red, Interacting: Blue)', fontsize=20)
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])  # 调整布局为标题留出空间
+
+    output_path = os.path.join(output_dir, f"{event_id}.png")
+    plt.savefig(output_path)
+    plt.close(fig)  # **非常重要**：在循环中关闭图像，防止内存泄漏
 
 
 if __name__ == '__main__':
-    main()
+    # 1. 初始化 nuScenes SDK
+    print("Initializing NuScenes SDK...")
+    nusc = NuScenes(version=NUSCENES_VERSION, dataroot=NUSCENES_DATAROOT, verbose=False)
+    print("SDK initialized.")
+
+    # 2. 加载事件文件
+    print(f"Loading events from '{EVENTS_JSON_PATH}'...")
+    if not os.path.exists(EVENTS_JSON_PATH):
+        print(f"Error: Events file not found at '{EVENTS_JSON_PATH}'")
+        exit()
+    with open(EVENTS_JSON_PATH, 'r') as f:
+        all_events_by_scene = json.load(f)
+
+    # 3. 创建输出目录
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print(f"Visualization results will be saved in '{OUTPUT_DIR}/'")
+
+    # 4. 遍历所有事件并进行可视化
+    # 将所有事件拉平成一个列表，方便使用tqdm显示总进度
+    all_events_flat = []
+    for scene_name, events_in_scene in all_events_by_scene.items():
+        all_events_flat.extend(events_in_scene)
+
+    print(f"Found a total of {len(all_events_flat)} events to visualize.")
+
+    for event in tqdm(all_events_flat, desc="Visualizing Events"):
+        try:
+            visualize_event(nusc, event, OUTPUT_DIR)
+        except Exception as e:
+            print(f"\nError processing event {event.get('event_id', 'N/A')}: {e}")
+            # 你可以选择在这里记录错误日志
+            continue
+
+    print("\nVisualization complete!")
