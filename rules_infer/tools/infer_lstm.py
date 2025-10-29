@@ -10,6 +10,7 @@ from nuscenes.utils.data_classes import Box
 from rules_infer.tools.motion_lstm import *
 import math
 import json
+from collections import defaultdict
 
 
 def calculate_kinematics(positions, timestamps):
@@ -86,7 +87,7 @@ class SocialInteractionDetector:
         # 转换为numpy数组并计算运动学信息
         processed_agent_data = {}
         for instance_token, data in agent_data.items():
-            if len(data['timestamps']) < self.config['HIST_LEN'] + self.config['PRED_LEN']:
+            if len(data['timestamps']) < self.config.HIST_LEN + self.config.PRED_LEN:
                 continue
 
             data_np = {
@@ -147,7 +148,7 @@ class SocialInteractionDetector:
 
     def _calculate_attribution_metrics(self, primary_data, alter_data, event_start_idx, pred_len, primary_pred_traj):
         """计算交互归因指标"""
-        H = self.config['HIST_LEN']
+        H = self.config.HIST_LEN
         event_end_idx = event_start_idx + pred_len
 
         # 找到两个agent在事件时间窗口内的重叠部分
@@ -241,8 +242,8 @@ class SocialInteractionDetector:
         all_agent_data = self._get_agent_trajectories_in_scene(scene_token)
         detected_events = []
 
-        H = self.config['HIST_LEN']
-        P = self.config['PRED_LEN']
+        H = self.config.HIST_LEN
+        P = self.config.PRED_LEN
 
         for primary_id, primary_data in all_agent_data.items():
             num_timesteps = len(primary_data['timestamps'])
@@ -275,9 +276,8 @@ class SocialInteractionDetector:
                 trigger_metrics = self._calculate_trigger_metrics(pred_abs_traj, gt_data_slice)
 
                 # 5. 判断是否触发事件
-                is_event = (trigger_metrics['FDE'] > self.config['THRESHOLDS']['FDE'] or
-                            trigger_metrics['max_longitudinal_velocity_error'] > self.config['THRESHOLDS'][
-                                'LONG_VEL_ERROR'])
+                is_event = (trigger_metrics['FDE'] > self.config.FDE_THRESHOLD or
+                            trigger_metrics['max_longitudinal_velocity_error'] > self.config.LONG_VEL_ERROR_THRE)
 
                 if is_event:
                     # 6. 如果触发，开始归因分析
@@ -356,6 +356,8 @@ class Config:
     FDE_VEL_MULTIPLIER = 1.5  # FDE的相对阈值，FDE > 速度 * 这个乘数
     TTC_THRESHOLD_S = 4.0  # 触发交互分析的碰撞时间阈值（秒）
 
+    FDE_THRESHOLD = 3.0
+    LONG_VEL_ERROR_THRE = 2.0
 
 if __name__ == '__main__':
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -389,7 +391,7 @@ if __name__ == '__main__':
         # 如果没有模型，代码也能运行，但预测会是随机的，可能检测出很多“假”事件
 
     # 4. 创建并运行检测器
-    detector = SocialInteractionDetector(model, nusc, CONFIG)
+    detector = SocialInteractionDetector(model, nusc, cfg)
 
     # 以nuScenes-mini中的一个经典交互场景为例：scene-0103
     # 这个场景中，ego-vehicle在一个T字路口礼让行人
