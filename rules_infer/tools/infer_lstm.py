@@ -29,7 +29,7 @@ class Config:
     BATCH_SIZE = 64
     LEARNING_RATE = 0.001
     NUM_EPOCHS = 20  # 演示目的，实际可增加
-    MODEL_SAVE_PATH = 'trajectory_lstm.pth'
+    MODEL_PATH = 'trajectory_lstm.pth'
 
     # --- 事件检测与分析参数 ---
     FDE_THRESHOLD_M = 2.0  # 最终位移误差的绝对阈值（米）
