@@ -6,6 +6,7 @@ from nuscenes.nuscenes import NuScenes
 import numpy as np
 from tqdm import tqdm
 from pyquaternion import Quaternion
+from nuscenes.utils.data_classes import Box
 
 
 class NuScenesTrajectoryDataset(Dataset):
