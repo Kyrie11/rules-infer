@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from nuscenes.nuscenes import NuScenes
 from nuscenes.prediction.helper import PredictHelper
-from nuscenes.eval.prediction.metrics import ADE, FDE
 from rules_infer.tools.motion_lstm import TrajectoryLSTM
 from rules_infer.tools.config import Config
 # [在这里粘贴上面提供的 Encoder, Decoder, Seq2Seq 类的代码]
