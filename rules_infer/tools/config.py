@@ -2,34 +2,36 @@
 import torch
 
 
+# config.py
+
 class Config:
-    # --- Dataset Parameters ---
-    DATAROOT = '/data0/senzeyu2/dataset/'  # <--- 修改为你的路径
-    VERSION = 'v1.0-mini'
+    # --- NuScenes 数据集参数 ---
+    NUSCENES_DATA_ROOT = '/data0/senzeyu2/dataset/nuscenes'  # 【请修改】NuScenes数据集的根目录
+    NUSCENES_VERSION = 'v1.0-trainval'  # 或者 'v1.0-mini'
 
-    # --- Trajectory Parameters ---
-    OBS_LEN = 8
-    PRED_LEN = 12
-    SEQ_LEN = OBS_LEN + PRED_LEN
+    # --- 模型与轨迹参数 ---
+    MODEL_SAVE_PATH = './trajectory_lstm.pth'  # 【请修改】您训练好的模型文件路径
+    HIST_LEN = 8  # 历史轨迹长度 (对应 4s)
+    PRED_LEN = 12  # 预测轨迹长度 (对应 6s)
+    INPUT_DIM = 2  # 输入特征维度 (x, y)
+    OUTPUT_DIM = 2  # 输出特征维度 (x, y)
+    FPS = 2  # NuScenes 帧率
 
-    # --- Feature Engineering ---
-    # 我们的特征向量维度:
-    # pos (x, y) = 2
-    # vel (vx, vy) = 2
-    # acc (ax, ay) = 2
-    # is_on_drivable_area (1/0) = 1
-    # traffic_light (one-hot: red, yellow, green, off) = 4
-    # TOTAL INPUT_DIM = 2 + 2 + 2 + 1 + 4 = 11
-    INPUT_DIM = 11
+    # --- 事件检测阈值 (先用占位符，由 Part 1 分析后确定) ---
+    FDE_THRESHOLD = 4.0  # 【待修改】例如，设为FDE的95百分位数
+    ICE_PEAK_THRESHOLD = 5.0  # 【待修改】例如，设为Max ICE的95百分位数
+    ICE_BASELINE = 1.0  # 【待修改】用于确定事件起止，可以设为中位数或稍高
 
-    # --- Training Parameters ---
-    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    BATCH_SIZE = 32  # 由于特征更复杂，可能需要减小batch size
-    NUM_EPOCHS = 50
-    LEARNING_RATE = 0.001
+    # --- 事件窗口与交互分析参数 ---
+    PADDING_FRAMES_BEFORE = int(2.5 * FPS)  # 向前回溯 2.5 秒
+    PADDING_FRAMES_AFTER = int(1.0 * FPS)  # 向后延伸 1.0 秒
+    INTERACTION_RADIUS_M = 30.0  # 搜索交互Agent的半径（米）
+    TOP_K_INTERACTING = 2  # 选取交互分数最高的K个agent
 
-    # --- LSTM Model Parameters ---
-    # 注意：INPUT_DIM 已在上面定义
-    HIDDEN_DIM = 128  # 增加隐藏层维度以处理更复杂的输入
-    NUM_LAYERS = 2
-    OUTPUT_DIM = 2  # 输出仍然是 (x, y)
+    # --- 误差分析脚本的输出路径 ---
+    ANALYSIS_OUTPUT_PATH = './error_analysis_results'
+
+    # --- 事件检测脚本的输出路径 ---
+    EVENT_JSON_OUTPUT_PATH = './social_events.json'
+
+
