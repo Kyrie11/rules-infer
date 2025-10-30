@@ -26,35 +26,25 @@ FPS = 2  # NuScenes的帧率
 
 # --- 辅助函数 ---
 def calculate_ice_signal(pred_traj, gt_traj, fps):
-    """计算瞬时综合误差 (ICE) 信号"""
-    # pred_traj, gt_traj: [PRED_LEN, 2]
-
-    # 1. 瞬时位移误差 IDE(t)
     ide = np.linalg.norm(pred_traj - gt_traj, axis=1)
-
-    # 2. 瞬时速度误差 IVE(t)
-    # 速度是位置的差分, 乘以fps得到每秒的米数
-    pred_vel = (pred_traj[1:] - pred_traj[:-1]) * fps
+    if len(pred_traj) < 2: return ide
+    pred_vel = (pred_traj[1:] - pred_traj[:-1]) * fps;
     gt_vel = (gt_traj[1:] - gt_traj[:-1]) * fps
-    pred_speed = np.linalg.norm(pred_vel, axis=1)
+    pred_speed = np.linalg.norm(pred_vel, axis=1);
     gt_speed = np.linalg.norm(gt_vel, axis=1)
-    ive = np.abs(pred_speed - gt_speed)
-    ive = np.append(ive, ive[-1])  # 补齐最后一位
-
-    # 3. 瞬时加速度误差 IAE(t)
-    pred_accel = (pred_vel[1:] - pred_vel[:-1]) * fps
-    gt_accel = (gt_vel[1:] - gt_vel[:-1]) * fps
-    pred_accel_scalar = np.linalg.norm(pred_accel, axis=1)
-    gt_accel_scalar = np.linalg.norm(gt_accel, axis=1)
-    iae = np.abs(pred_accel_scalar - gt_accel_scalar)
-    iae = np.append(iae, [iae[-1], iae[-1]])  # 补齐最后两位
-
-    # 4. 组合成ICE(t) - 权重可调
-    w_pos = 1.0
-    w_acc = 0.5  # 加速度权重很重要
-
-    ice = w_pos * ide + w_acc * iae
-    return ice
+    ive = np.abs(pred_speed - gt_speed);
+    ive = np.append(ive, ive[-1])
+    if len(pred_vel) < 2:
+        iae = np.zeros_like(ide)
+    else:
+        pred_accel = (pred_vel[1:] - pred_vel[:-1]) * fps;
+        gt_accel = (gt_vel[1:] - gt_vel[:-1]) * fps
+        pred_accel_scalar = np.linalg.norm(pred_accel, axis=1);
+        gt_accel_scalar = np.linalg.norm(gt_accel, axis=1)
+        iae = np.abs(pred_accel_scalar - gt_accel_scalar);
+        iae = np.append(iae, [iae[-1]] * (len(ide) - len(iae)))
+    w_pos, w_acc = 1.0, 0.5
+    return w_pos * ide + w_acc * iae
 
 
 def get_sample_token_by_index(nusc, scene, sample_idx):
@@ -65,6 +55,7 @@ def get_sample_token_by_index(nusc, scene, sample_idx):
         current_token = sample['next']
         if not current_token: break
     return current_token
+
 
 def get_all_instances_in_scene(nusc, scene):
     instance_tokens = set()
@@ -77,7 +68,7 @@ def get_all_instances_in_scene(nusc, scene):
         current_sample_token = sample['next']
     return list(instance_tokens)
 
-# --- 主逻辑 ---
+
 def main():
     config = Config()
     DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -86,12 +77,12 @@ def main():
     nusc = NuScenes(version=config.NUSCENES_VERSION, dataroot=config.NUSCENES_DATA_ROOT, verbose=False)
     helper = PredictHelper(nusc)
 
+    # 确保加载的是在新数据上训练的模型
     model = TrajectoryLSTM(config).to(DEVICE)
     model.load_state_dict(torch.load(config.MODEL_SAVE_PATH, map_location=DEVICE))
     model.eval()
 
     all_fde, all_ade, all_max_ice = [], [], []
-
     val_scenes = [s for s in nusc.scene if nusc.get('log', s['log_token'])['logfile'].startswith('n008')]
 
     with torch.no_grad():
@@ -105,37 +96,43 @@ def main():
             all_instance_tokens_in_scene = get_all_instances_in_scene(nusc, scene)
 
             for instance_token in all_instance_tokens_in_scene:
-
-                # --- FINAL CORRECTION: Use try-except to handle missing agents ---
                 try:
-                    # 首先，检查agent类型
                     first_ann_token = nusc.get('instance', instance_token)['first_annotation_token']
-                    annotation = nusc.get('sample_annotation', first_ann_token)
-                    if 'vehicle' not in annotation['category_name']:
-                        continue
+                    if 'vehicle' not in nusc.get('sample_annotation', first_ann_token)['category_name']: continue
 
-                    # 然后，尝试获取轨迹，这可能会因为agent在mid_sample_token不存在而失败
-                    past_traj = helper.get_past_for_agent(instance_token, mid_sample_token,
-                                                          seconds=config.HIST_LEN / config.FPS, in_agent_frame=False)
-                    future_traj = helper.get_future_for_agent(instance_token, mid_sample_token,
-                                                              seconds=config.PRED_LEN / config.FPS,
-                                                              in_agent_frame=False)
+                    # 1. 获取全局坐标轨迹
+                    past_traj_global = helper.get_past_for_agent(instance_token, mid_sample_token,
+                                                                 seconds=config.HIST_LEN / config.FPS,
+                                                                 in_agent_frame=False)
+                    future_traj_global = helper.get_future_for_agent(instance_token, mid_sample_token,
+                                                                     seconds=config.PRED_LEN / config.FPS,
+                                                                     in_agent_frame=False)
 
                 except KeyError:
-                    # 如果发生KeyError，说明这个instance在mid_sample_token不存在，我们优雅地跳过
-                    continue
-                # --- END OF CORRECTION ---
-
-                if past_traj.shape[0] < config.HIST_LEN or future_traj.shape[0] < config.PRED_LEN:
                     continue
 
-                obs_traj_tensor = torch.tensor(past_traj, dtype=torch.float32).unsqueeze(0).to(DEVICE)
-                pred_future_traj_tensor = model(obs_traj_tensor)
-                pred_future_traj = pred_future_traj_tensor.squeeze(0).cpu().numpy()
+                if past_traj_global.shape[0] < config.HIST_LEN or future_traj_global.shape[
+                    0] < config.PRED_LEN: continue
 
-                fde = np.linalg.norm(pred_future_traj[-1] - future_traj[-1])
-                ade = np.mean(np.linalg.norm(pred_future_traj - future_traj, axis=1))
-                ice_signal = calculate_ice_signal(pred_future_traj, future_traj, config.FPS)
+                # --- 核心修正：坐标系归一化 ---
+                # 2. 找到参考点并归一化输入
+                ref_point = past_traj_global[-1]
+                past_traj_relative = past_traj_global - ref_point
+
+                obs_tensor = torch.tensor(past_traj_relative, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+
+                # 3. 模型预测得到相对轨迹
+                pred_future_traj_relative_tensor = model(obs_tensor)
+                pred_future_traj_relative = pred_future_traj_relative_tensor.squeeze(0).cpu().numpy()
+
+                # 4. 将预测结果转换回全局坐标系以计算误差
+                pred_future_traj_global = pred_future_traj_relative + ref_point
+                # --- 修正结束 ---
+
+                # 5. 在全局坐标系下计算误差
+                fde = np.linalg.norm(pred_future_traj_global[-1] - future_traj_global[-1])
+                ade = np.mean(np.linalg.norm(pred_future_traj_global - future_traj_global, axis=1))
+                ice_signal = calculate_ice_signal(pred_future_traj_global, future_traj_global, config.FPS)
                 max_ice = np.max(ice_signal)
 
                 all_fde.append(fde)
