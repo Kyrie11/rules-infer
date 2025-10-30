@@ -57,6 +57,21 @@ def calculate_ice_signal(pred_traj, gt_traj, fps):
     return ice
 
 
+def get_sample_token_by_index(nusc, scene, sample_idx):
+    """
+    根据索引（第几帧）获取场景中的sample_token。
+    """
+    if sample_idx < 0 or sample_idx >= scene['nbr_samples']:
+        raise IndexError("Sample index out of bounds.")
+
+    current_token = scene['first_sample_token']
+    for _ in range(sample_idx):
+        sample = nusc.get('sample', current_token)
+        current_token = sample['next']
+        if not current_token:  # 以防万一
+            break
+    return current_token
+
 # --- 主逻辑 ---
 def main():
     print(f"Using device: {DEVICE}")
@@ -75,8 +90,13 @@ def main():
 
     with torch.no_grad():
         for scene in tqdm(val_scenes, desc="Analyzing Scenes"):
-            # 在场景中间点进行采样预测
-            mid_sample_token = helper.get_sample_token_for_scene(scene['name'], 0.5)
+
+            # --- CORRECTED LOGIC for finding the middle sample ---
+            mid_index = scene['nbr_samples'] // 2
+            try:
+                mid_sample_token = get_sample_token_by_index(nusc, scene, mid_index)
+            except IndexError:
+                continue
 
             for instance_token in helper.get_annotations_for_scene(scene['name']):
                 annotation = nusc.get('sample_annotation',
@@ -85,22 +105,20 @@ def main():
                     continue
 
                 past_traj = helper.get_past_for_agent(instance_token, mid_sample_token,
-                                                      seconds=config.HIST_LEN / config.FPS, in_agent_frame=False)
+                                                      seconds=cfg.HIST_LEN / cfg.FPS, in_agent_frame=False)
                 future_traj = helper.get_future_for_agent(instance_token, mid_sample_token,
-                                                          seconds=config.PRED_LEN / config.FPS, in_agent_frame=False)
+                                                          seconds=cfg.PRED_LEN / cfg.FPS, in_agent_frame=False)
 
-                if past_traj.shape[0] < config.HIST_LEN or future_traj.shape[0] < config.PRED_LEN:
+                if past_traj.shape[0] < cfg.HIST_LEN or future_traj.shape[0] < cfg.PRED_LEN:
                     continue
 
                 obs_traj_tensor = torch.tensor(past_traj, dtype=torch.float32).unsqueeze(0).to(DEVICE)
-
-                # MODIFIED: 使用您的模型进行前向传播
                 pred_future_traj_tensor = model(obs_traj_tensor)
                 pred_future_traj = pred_future_traj_tensor.squeeze(0).cpu().numpy()
 
                 fde = np.linalg.norm(pred_future_traj[-1] - future_traj[-1])
                 ade = np.mean(np.linalg.norm(pred_future_traj - future_traj, axis=1))
-                ice_signal = calculate_ice_signal(pred_future_traj, future_traj, config.FPS)
+                ice_signal = calculate_ice_signal(pred_future_traj, future_traj, cfg.FPS)
                 max_ice = np.max(ice_signal)
 
                 all_fde.append(fde)
@@ -115,6 +133,8 @@ def main():
     # 绘制直方图并打印百分位数
     print("\n--- Error Metrics Distribution Analysis ---")
     for name, data in [("FDE", all_fde), ("ADE", all_ade), ("Max ICE", all_max_ice)]:
+        data = data[np.isfinite(data)]
+        if len(data) == 0: continue
         plt.figure(figsize=(10, 5))
         plt.hist(data, bins=100, range=(0, np.percentile(data, 99.5)))  # 忽略极端离群值以获得更好的可视化
         plt.title(f"Distribution of {name}")
