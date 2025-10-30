@@ -58,24 +58,15 @@ def calculate_ice_signal(pred_traj, gt_traj, fps):
 
 
 def get_sample_token_by_index(nusc, scene, sample_idx):
-    """
-    根据索引（第几帧）获取场景中的sample_token。
-    """
-    if sample_idx < 0 or sample_idx >= scene['nbr_samples']:
-        raise IndexError("Sample index out of bounds.")
-
+    if sample_idx < 0 or sample_idx >= scene['nbr_samples']: raise IndexError("Sample index out of bounds.")
     current_token = scene['first_sample_token']
-    for _ in range(sample_idx):
+    for _ in range(int(sample_idx)):
         sample = nusc.get('sample', current_token)
         current_token = sample['next']
-        if not current_token:  # 以防万一
-            break
+        if not current_token: break
     return current_token
 
 def get_all_instances_in_scene(nusc, scene):
-    """
-    正确的方法：遍历场景中的所有样本来收集所有唯一的instance_token。
-    """
     instance_tokens = set()
     current_sample_token = scene['first_sample_token']
     while current_sample_token:
@@ -111,22 +102,29 @@ def main():
             except IndexError:
                 continue
 
-            # --- CORRECTED LOGIC to get all instances ---
             all_instance_tokens_in_scene = get_all_instances_in_scene(nusc, scene)
 
             for instance_token in all_instance_tokens_in_scene:
+
+                # --- FINAL CORRECTION: Use try-except to handle missing agents ---
                 try:
-                    annotation = nusc.get('sample_annotation',
-                                          nusc.get('instance', instance_token)['first_annotation_token'])
+                    # 首先，检查agent类型
+                    first_ann_token = nusc.get('instance', instance_token)['first_annotation_token']
+                    annotation = nusc.get('sample_annotation', first_ann_token)
                     if 'vehicle' not in annotation['category_name']:
                         continue
-                except KeyError:
-                    continue
 
-                past_traj = helper.get_past_for_agent(instance_token, mid_sample_token,
-                                                      seconds=config.HIST_LEN / config.FPS, in_agent_frame=False)
-                future_traj = helper.get_future_for_agent(instance_token, mid_sample_token,
-                                                          seconds=config.PRED_LEN / config.FPS, in_agent_frame=False)
+                    # 然后，尝试获取轨迹，这可能会因为agent在mid_sample_token不存在而失败
+                    past_traj = helper.get_past_for_agent(instance_token, mid_sample_token,
+                                                          seconds=config.HIST_LEN / config.FPS, in_agent_frame=False)
+                    future_traj = helper.get_future_for_agent(instance_token, mid_sample_token,
+                                                              seconds=config.PRED_LEN / config.FPS,
+                                                              in_agent_frame=False)
+
+                except KeyError:
+                    # 如果发生KeyError，说明这个instance在mid_sample_token不存在，我们优雅地跳过
+                    continue
+                # --- END OF CORRECTION ---
 
                 if past_traj.shape[0] < config.HIST_LEN or future_traj.shape[0] < config.PRED_LEN:
                     continue
