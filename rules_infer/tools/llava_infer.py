@@ -100,7 +100,7 @@ def analyze_event(event_dir):
         output_path = event_dir / 'vlm_analysis.json'
         with open(output_path, 'w') as f:
             json.dump(analysis_content, f, indent=4)
-
+            tqdm.write("return corrected result")
         return True, output_path
 
     except requests.exceptions.RequestException as e:
