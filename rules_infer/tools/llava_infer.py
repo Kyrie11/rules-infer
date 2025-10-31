@@ -49,13 +49,15 @@ Follow a strict Chain of Thought to explain the failure. You MUST structure your
     }}
 
 """
+def encode_image_to_base64(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
 
 def analyze_event(event_dir):
     manifest_path = event_dir / 'manifest.json'
     # if not manifest_path.exists():
     #     tqdm.write(f" [Warning] Manifest not found in {event_dir}. Skipping.")
     # return
-    print("correct")
     with open(manifest_path, 'r') as f:
         manifest = json.load(f)
     images_base64 = []
