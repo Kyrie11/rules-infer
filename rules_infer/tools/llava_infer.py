@@ -57,7 +57,7 @@ def analyze_event(event_dir):
     manifest_path = event_dir / 'manifest.json'
     if not manifest_path.exists():
         tqdm.write(f" [Warning] Manifest not found in {event_dir}. Skipping.")
-    return
+        return
     with open(manifest_path, 'r') as f:
         manifest = json.load(f)
     images_base64 = []
