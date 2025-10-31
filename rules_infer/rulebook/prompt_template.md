@@ -5,7 +5,7 @@ You have two primary objectives:
 
 **[CONTEXT]**
 {
-  "weather": "clear",
+  "weather": "clear", 
   "time_of_day": "day",
   "road_type": "residential_street"
 }
