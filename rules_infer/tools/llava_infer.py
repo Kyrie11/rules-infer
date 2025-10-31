@@ -62,8 +62,8 @@ def analyze_event(event_dir):
         manifest = json.load(f)
     images_base64 = []
     # 按帧号排序，以保证时序
-    print("sort frames")
     sorted_frames = sorted(manifest['frames'].keys())
+    prompt_manifest = {"event_id": manifest["event_id"], "frames": {}}
     for frame_key in sorted_frames:
         for image_filename in manifest['frames'][frame_key]:
             image_path = event_dir / image_filename
