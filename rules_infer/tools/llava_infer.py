@@ -53,6 +53,7 @@ Follow a strict Chain of Thought to explain the failure. You MUST structure your
 def analyze_event(event_dir):
     manifest_path = event_dir / 'manifest.json'
     if not manifest_path.exists():
+        print(f" [Warning] Manifest not found in {event_dir}. Skipping.")
         tqdm.write(f" [Warning] Manifest not found in {event_dir}. Skipping.")
     return
     with open(manifest_path, 'r') as f:
