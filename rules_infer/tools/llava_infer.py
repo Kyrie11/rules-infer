@@ -55,9 +55,9 @@ def encode_image_to_base64(image_path):
 
 def analyze_event(event_dir):
     manifest_path = event_dir / 'manifest.json'
-    # if not manifest_path.exists():
-    #     tqdm.write(f" [Warning] Manifest not found in {event_dir}. Skipping.")
-    # return
+    if not manifest_path.exists():
+        tqdm.write(f" [Warning] Manifest not found in {event_dir}. Skipping.")
+    return
     with open(manifest_path, 'r') as f:
         manifest = json.load(f)
     images_base64 = []
@@ -124,8 +124,10 @@ if __name__=="__main__":
             continue
 
         tqdm.write(f"\nProcessing event: {event_dir.name}")
-        success, result_path = analyze_event(event_dir)
-        if success:
-            tqdm.write(f"  -> Analysis successful. Result saved to {result_path}")
+        result = analyze_event(event_dir)
+        if result != None:
+            success, result_path = result
+            if success:
+                tqdm.write(f"  -> Analysis successful. Result saved to {result_path}")
 
     print("\nVLM analysis complete.")
