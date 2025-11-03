@@ -279,7 +279,7 @@ def main():
                         key_agent_kinematics_slice = kinematics_cache[instance_token][start_idx:end_idx]
 
                         interacting_agents_kinematics = {}
-                        for inter_token in interacting_agents_tokens:
+                        for inter_token in interacting_agents:
                             if inter_token not in kinematics_cache:
                                 kinematics_cache[inter_token] = get_agent_full_kinematics(nusc, helper, scene,
                                                                                           inter_token, config)
