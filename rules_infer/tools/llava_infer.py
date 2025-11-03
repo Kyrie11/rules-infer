@@ -270,7 +270,7 @@ def analyze_event(event, event_dir):
     tqdm.write(f"the final prompt is {final_prompt}")
 
     if final_prompt.count('<image>') != len(images_base64):
-        tqdm.write(f"[ERROR] Mismatch in event {event_dir.name}: "
+        tqdm.write(f"[ERROR] Mismatch in event {event_dir}: "
                    f"{final_prompt.count('<image>')} placeholders vs "
                    f"{len(images_base64)} images.")
         return False, None
