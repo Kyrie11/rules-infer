@@ -174,7 +174,7 @@ def analyze_event(event, event_dir):
     prompt_manifest = {"event_id": manifest["event_id"], "frames": {}}
 
     for frame_key in sorted_frames:
-        visual_evidence_lines.append(f"**Frame {frame_key:03d}:**")
+        visual_evidence_lines.append(f"**Frame {int(frame_key):03d}:**")
         line_parts = []
         for image_filename in manifest['frames'][frame_key]:
             image_path = event_dir / image_filename
