@@ -158,6 +158,37 @@ def get_traffic_light_status_for_scene(nusc, nusc_map, sample_token):
     return ", ".join(set(light_statuses))  # e.g., "green, red"
 
 
+def get_sample_token_by_frame_index(nusc: NuScenes, scene: dict, frame_index: int) -> str:
+    """
+    Given a scene and a frame index, return the corresponding sample_token.
+
+    :param nusc: NuScenes object.
+    :param scene: A scene record from nusc.scene.
+    :param frame_index: The zero-based index of the sample in the scene.
+    :return: The sample_token.
+    """
+    if not (0 <= frame_index < scene['nbr_samples']):
+        raise ValueError(f"Frame index {frame_index} is out of bounds for scene with {scene['nbr_samples']} samples.")
+
+    sample_token = scene['first_sample_token']
+    # Iterate through the linked list of samples
+    for _ in range(frame_index):
+        sample = nusc.get('sample', sample_token)
+        sample_token = sample['next']
+        if not sample_token:  # Should not happen if frame_index is in bounds
+            raise IndexError("Reached end of scene unexpectedly.")
+
+    return sample_token
+
+def build_scene_index(nusc: NuScenes, scene: dict) -> list[str]:
+    """Builds a list of sample_tokens for a scene, indexed by frame number."""
+    scene_index = []
+    current_token = scene['first_sample_token']
+    while current_token:
+        scene_index.append(current_token)
+        sample = nusc.get('sample', current_token)
+        current_token = sample['next']
+    return scene_index
 
 def analyze_event(event, event_dir):
     manifest_path = os.path.join(event_dir, 'manifest.json')
@@ -220,10 +251,16 @@ def analyze_event(event, event_dir):
             'dynamics': get_agent_dynamics(nusc, helper, agent_token, scene_token, start_frame, end_frame)
         })
 
-    peak_sample_token = helper.get_sample_token_for_scene(scene_token, peak_frame)
-    context['environment_at_peak'] = {
-        'traffic_lights': get_traffic_light_status_for_scene(nusc, nusc_map, peak_sample_token)
-    }
+    try:
+        peak_sample_token = get_sample_token_by_frame_index(nusc, scene, peak_frame)
+        context['environment_at_peak'] = {
+            'traffic_lights': get_traffic_light_status_for_scene(nusc, nusc_map, peak_sample_token)
+        }
+    except (ValueError, IndexError) as e:
+        tqdm.write(f"[Warning] Could not get peak_sample_token for event {event_dir.name}: {e}")
+        context['environment_at_peak'] = {
+            'traffic_lights': 'Error retrieving status'
+        }
 
     scene_context_yaml = yaml.dump(context, indent=2, sort_keys=False  )
 
