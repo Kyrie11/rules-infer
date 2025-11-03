@@ -179,7 +179,7 @@ def analyze_event(event, event_dir):
         for image_filename in manifest['frames'][frame_key]:
             image_path = os.path.join(event_dir, image_filename)
             line_parts.append(f"{image_filename}:<image>")
-            if image_path.exists():
+            if os.path.exists(image_path):
                 images_base64.append(encode_image_to_base64(image_path))
             else:
                 tqdm.write(f"  [Warning] Image {image_filename} not found in {event_dir}. Skipping image.")
