@@ -288,7 +288,7 @@ if __name__=="__main__":
         start_frame, end_frame = event['event_start_frame'], event['event_end_frame']
         event_id = f"{scene_token}_{key_agent_token}_{start_frame}-{end_frame}"
         event_output_dir = os.path.join(OUTPUT_DIR, event_id)
-        if not event_output_dir.exists():
+        if not os.path.exists(event_output_dir):
             tqdm.write(f" not found event {event_id}. Skipping.")
             continue
 
