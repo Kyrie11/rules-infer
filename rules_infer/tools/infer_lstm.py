@@ -73,7 +73,7 @@ def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
         ann_t0 = annotations.get(i - 1)
 
         if ann_t1:
-            state['position'] = ann_t1['translation'][:2].tolist()
+            state['position'] = ann_t1['translation'][:2]
             state['rotation_q'] = ann_t1['rotation']
 
             # 计算速度和角速度 (需要t1和t0)
