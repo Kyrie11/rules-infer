@@ -161,7 +161,7 @@ def get_traffic_light_status_for_scene(nusc, nusc_map, sample_token):
 
 def analyze_event(event, event_dir):
     manifest_path = os.path.join(event_dir, 'manifest.json')
-    if not manifest_path.exists():
+    if not os.path.exists(manifest_path):
         tqdm.write(f" [Warning] Manifest not found in {event_dir}. Skipping.")
         return
     with open(manifest_path, 'r') as f:
