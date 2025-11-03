@@ -174,11 +174,10 @@ def analyze_event(event, event_dir):
     prompt_manifest = {"event_id": manifest["event_id"], "frames": {}}
 
     for frame_key in sorted_frames:
-        tqdm.write(f"frame_key:{frame_key}")
         visual_evidence_lines.append(f"**Frame {int(frame_key.split("_")[1]):03d}:**")
         line_parts = []
         for image_filename in manifest['frames'][frame_key]:
-            image_path = event_dir / image_filename
+            image_path = os.path.join(event_dir, image_filename)
             line_parts.append(f"{image_filename}:<image>")
             if image_path.exists():
                 images_base64.append(encode_image_to_base64(image_path))
