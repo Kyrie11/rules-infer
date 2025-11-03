@@ -292,7 +292,7 @@ if __name__=="__main__":
             tqdm.write(f" not found event {event_id}. Skipping.")
             continue
 
-        if (event_output_dir/'vlm.json').exists():
+        if os.path.exists(os.path.join(event_output_dir, 'vlm.json')):
             tqdm.write(f"Event {event_id} already analyzed. Skipping.")
             continue
 
