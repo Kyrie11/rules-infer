@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 from nuscenes.nuscenes import NuScenes
 from nuscenes.prediction.helper import PredictHelper
-from nuscenes.utils.data_classes import TrafficLight
+from nuscenes.map_expansion import get_map
 import numpy as np
 from pyquaternion import Quaternion
 from nuscenes.utils.data_classes import Box
@@ -43,11 +43,12 @@ INTERACTION_RADIUS = 30.0 # 米
 TOP_K_INTERACTING = 2 # 选取交互分数最高的K个agent
 
 
-def get_traffic_lights_in_lane(nusc, scene, position, config):
+def get_traffic_lights_in_lane(nusc, map_api, position, config):
     """
     获取给定位置附近的交通灯状态。
     """
-    traffic_lights_in_scene = nusc.get('traffic_light', scene['log_token'])
+    # 获取交通灯数据
+    traffic_lights_in_scene = map_api.get_traffic_lights()
     nearby_lights = []
 
     for traffic_light in traffic_lights_in_scene:
@@ -71,7 +72,7 @@ def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
     返回一个列表，每个元素是该帧的运动学状态字典。
     """
     kinematics_list = [{} for _ in range(scene['nbr_samples'])]
-
+    map_api = get_map(nusc, scene)
     # 1. 获取完整的标注历史
     annotations = {}
     sample_token = scene['first_sample_token']
