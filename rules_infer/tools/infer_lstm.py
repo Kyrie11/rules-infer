@@ -62,7 +62,7 @@ def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
     current_token = scene['first_sample_token']
     frame_idx = 0
     while current_token:
-        tl_ann_tokens = nusc.field2token('traffic_light_annotation', 'sample_token', current_token)
+        tl_ann_tokens = nusc.sample_to_traffic_light_annotation_tokens.get(current_token, [])
         status_map = {}
         for tl_ann_token in tl_ann_tokens:
             tl_ann = nusc.get('traffic_light_annotation', tl_ann_token)
@@ -203,7 +203,8 @@ def get_traffic_light_status_for_agent(nusc, sample_token, instance_token):
 
     # 4. 查询交通灯状态
     # 获取该sample中所有的traffic_light_annotation tokens
-    tl_ann_tokens = nusc.field2token('traffic_light_annotation', 'sample_token', sample_token)
+    tl_ann_tokens = nusc.sample_to_traffic_light_annotation_tokens.get(sample_token, [])
+
 
     # 创建一个从物理交通灯token到其状态的映射
     status_map = {}
