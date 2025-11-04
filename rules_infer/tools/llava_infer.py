@@ -94,8 +94,11 @@ def get_agent_dynamics(kinematics_list):
         # 加速度 (acceleration magnitude)
         if 'acceleration' in frame_data and frame_data['acceleration'] is not None:
             accel_vec = np.array(frame_data['acceleration'])
+            lon_acc = accel_vec[0]
+            lat_acc = accel_vec[1]
             # formatted_frame['acceleration'] = round(np.linalg.norm(accel_vec), 2)  # m/s^2
-            formatted_frame['acceleration'] = accel_vec
+            formatted_frame['lon_acc'] = round(np.linalg.norm(lon_acc), 2)
+            formatted_frame['lat_acc'] = round(np.linalg.norm(lat_acc), 2)
 
         # 偏航角速度 (yaw rate)
         if 'angular_velocity_yaw' in frame_data and frame_data['angular_velocity_yaw'] is not None:
