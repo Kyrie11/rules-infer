@@ -96,9 +96,9 @@ def get_agent_dynamics(kinematics_list):
             accel_vec = np.array(frame_data['acceleration'])
             lon_acc = accel_vec[0]
             lat_acc = accel_vec[1]
-            tqdm.write(f"accel_vec:{accel_vec}")
-            tqdm.write(f"lon_acc:{lon_acc}")
-            tqdm.write(f"lat_acc:{lat_acc}")
+            # tqdm.write(f"accel_vec:{accel_vec}")
+            # tqdm.write(f"lon_acc:{lon_acc}")
+            # tqdm.write(f"lat_acc:{lat_acc}")
             # formatted_frame['acceleration'] = round(np.linalg.norm(accel_vec), 2)  # m/s^2
             formatted_frame['lon_acc'] = lon_acc
             formatted_frame['lat_acc'] = lat_acc
@@ -269,7 +269,7 @@ def analyze_event(event, event_dir):
     final_prompt = PROMPT_TEMPLATE.format(scene_context_yaml=scene_context_yaml,
     visual_evidence_section=visual_evidence_section)
 
-    # tqdm.write(f"the final prompt is {final_prompt}")
+    tqdm.write(f"the final prompt is {final_prompt}")
 
     if final_prompt.count('<image>') != len(images_base64):
         tqdm.write(f"[ERROR] Mismatch in event {event_dir}: "
