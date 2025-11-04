@@ -39,7 +39,7 @@ Here is the structured context of the scene, including agent dynamics and enviro
 
 
 Visual Evidence (Chronological Frames):
-The following section presents a frame-by-frame visual breakdown of the event. Each <image> token corresponds to a cropped image from a specific camera view at a specific moment in time.
+The following section presents a frame-by-frame visual breakdown of the event. Each image token corresponds to a cropped image from a specific camera view at a specific moment in time.
 
 {visual_evidence_section}
 
