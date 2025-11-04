@@ -234,7 +234,7 @@ def analyze_event(event, event_dir):
     key_agent_token = event['key_agent_token']
     context['key_agent'] = {
         'token': key_agent_token,
-        'dynamics': get_agent_dynamics(event_kinematics),
+        'dynamics': get_agent_dynamics(event_kinematics['key_agent']),
         'map_context_at_peak': get_map_context_for_agent(nusc, nusc_map, helper, key_agent_token, scene_token,
                                                          peak_frame)
     }
