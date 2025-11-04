@@ -3,6 +3,8 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 from nuscenes.nuscenes import NuScenes
 from nuscenes.prediction.helper import PredictHelper
+from nuscenes.map_expansion.map_api import NuScenesMap
+from nuscenes.map_expansion.arcline_path_utils import discretize_lanes
 import numpy as np
 from pyquaternion import Quaternion
 from nuscenes.utils.data_classes import Box
@@ -49,6 +51,26 @@ def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
     """
     kinematics_list = [{} for _ in range(scene['nbr_samples'])]
 
+    # --- 在开头获取一次地图 ---
+    log = nusc.get('log', scene['log_token'])
+    map_name = log['location']
+    if map_name not in map_cache:
+        map_cache[map_name] = NuScenesMap(dataroot=config.NUSCENES_DATA_ROOT, map_name=map_name)
+    nusc_map = map_cache[map_name]
+    # 建立一个场景内所有帧的交通灯状态查找表，提高效率
+    scene_tl_status_by_frame = [{} for _ in range(scene['nbr_samples'])]
+    current_token = scene['first_sample_token']
+    frame_idx = 0
+    while current_token:
+        tl_ann_tokens = nusc.field2token('traffic_light_annotation', 'sample_token', current_token)
+        status_map = {}
+        for tl_ann_token in tl_ann_tokens:
+            tl_ann = nusc.get('traffic_light_annotation', tl_ann_token)
+            status_map[tl_ann['instance_token']] = tl_ann['status']
+        scene_tl_status_by_frame[frame_idx] = status_map
+        current_token = nusc.get('sample', current_token)['next']
+        frame_idx += 1
+    # --- 预计算结束 ---
     # 1. 获取完整的标注历史
     annotations = {}
     sample_token = scene['first_sample_token']
@@ -75,6 +97,25 @@ def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
         if ann_t1:
             state['position'] = ann_t1['translation'][:2]
             state['rotation_q'] = ann_t1['rotation']
+
+            # --- 新增：交通灯状态提取 ---
+            x, y = ann_t1['translation'][:2]
+            closest_lane_token = nusc_map.get_closest_lane(x, y, radius=3.0)
+            if not closest_lane_token:
+                state['traffic_light_status'] = "NO_LANE"
+            else:
+                traffic_light_tokens = nusc_map.get_traffic_lights_for_lane(closest_lane_token)
+                if not traffic_light_tokens:
+                    state['traffic_light_status'] = "NO_TRAFFIC_LIGHT"
+                else:
+                    status_found = "UNKNOWN"
+                    frame_status_map = scene_tl_status_by_frame[i]
+                    for tl_token in traffic_light_tokens:
+                        if tl_token in frame_status_map:
+                            status_found = frame_status_map[tl_token]
+                            break
+                    state['traffic_light_status'] = status_found
+            # --- 新增结束 ---
 
             # 计算速度和角速度 (需要t1和t0)
             if ann_t0:
@@ -119,6 +160,63 @@ def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
             state_t1['angular_acceleration_yaw'] = float(ang_accel)
 
     return kinematics_list
+
+
+def get_traffic_light_status_for_agent(nusc, sample_token, instance_token):
+    """
+    获取单个agent在特定帧的交通灯状态。
+
+    返回:
+    - 'red', 'yellow', 'green', 'off' 等状态字符串
+    - 'NO_LANE': Agent不在车道上
+    - 'NO_TRAFFIC_LIGHT': 所在车道不受交通灯控制
+    - 'UNKNOWN': 交通灯存在但该帧状态未知
+    """
+    global map_cache  # 使用全局缓存
+
+    # 1. 获取地图对象
+    sample = nusc.get('sample', sample_token)
+    scene = nusc.get('scene', sample['scene_token'])
+    log = nusc.get('log', scene['log_token'])
+    map_name = log['location']
+
+    if map_name not in map_cache:
+        map_cache[map_name] = NuScenesMap(dataroot=NUSCENES_PATH, map_name=map_name)
+    nusc_map = map_cache[map_name]
+
+    # 2. 获取Agent位置和车道
+    try:
+        ann = nusc.get_sample_annotation(instance_token, sample_token)
+    except KeyError:
+        return "UNKNOWN"  # 该帧没有此Agent
+
+    x, y = ann['translation'][:2]
+    closest_lane_token = nusc_map.get_closest_lane(x, y, radius=3.0)  # 稍微放宽半径
+
+    if not closest_lane_token:
+        return "NO_LANE"
+
+    # 3. 找到控制车道的交通灯
+    traffic_light_tokens = nusc_map.get_traffic_lights_for_lane(closest_lane_token)
+    if not traffic_light_tokens:
+        return "NO_TRAFFIC_LIGHT"
+
+    # 4. 查询交通灯状态
+    # 获取该sample中所有的traffic_light_annotation tokens
+    tl_ann_tokens = nusc.field2token('traffic_light_annotation', 'sample_token', sample_token)
+
+    # 创建一个从物理交通灯token到其状态的映射
+    status_map = {}
+    for tl_ann_token in tl_ann_tokens:
+        tl_ann = nusc.get('traffic_light_annotation', tl_ann_token)
+        status_map[tl_ann['instance_token']] = tl_ann['status']
+
+    # 在映射中查找我们的交通灯状态
+    for tl_token in traffic_light_tokens:
+        if tl_token in status_map:
+            return status_map[tl_token]  # 返回找到的第一个关联交通灯的状态
+
+    return "UNKNOWN"  # 关联的交通灯存在，但在该帧没有状态标注
 
 def find_interacting_agents(nusc, helper, key_agent_token, scene, onset_frame_idx, config):
     try:
