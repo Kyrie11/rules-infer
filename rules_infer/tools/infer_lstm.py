@@ -42,13 +42,13 @@ INTERACTION_RADIUS = 30.0 # 米
 TOP_K_INTERACTING = 2 # 选取交互分数最高的K个agent
 
 
-
 def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
     """
     一次性计算一个Agent在整个场景中的完整运动学信息。
     返回一个列表，每个元素是该帧的运动学状态字典。
     """
     kinematics_list = [{} for _ in range(scene['nbr_samples'])]
+
     # 1. 获取完整的标注历史
     annotations = {}
     sample_token = scene['first_sample_token']

@@ -78,36 +78,31 @@ def encode_image_to_base64(image_path):
         return base64.b64encode(image_file.read()).decode('utf-8')
 
 
-def get_agent_dynamics(nusc, helper, agent_token, scene_token, start_frame, end_frame):
-    """提取一个agent在指定时间窗口内的运动学信息"""
+def get_agent_dynamics(kinematics_list):
     dynamics = []
-    scene = nusc.get('scene', scene_token)
-    current_sample_token = scene['first_sample_token']
+    for frame_data in kinematics_list:
+        # 只处理包含有效运动学数据的帧
+        if not frame_data:
+            continue
 
-    for i in range(scene['nbr_samples']):
-        if start_frame <= i <= end_frame:
-            try:
-                ann = helper.get_sample_annotation(agent_token, current_sample_token)
-                dynamics.append({
-                    "frame": i,
-                    # NuScenes v1.0 velocity is in m/s, in global frame
-                    "velocity": round(np.linalg.norm(helper.get_velocity_for_agent(agent_token, current_sample_token)),
-                                      2),
-                    "acceleration": round(
-                        np.linalg.norm(helper.get_acceleration_for_agent(agent_token, current_sample_token)), 2),
-                    "yaw_rate": round(helper.get_heading_change_rate_for_agent(agent_token, current_sample_token), 3)
-                    # in rad/s
-                })
-            except (KeyError, AssertionError):  # AssertionError for get_velocity if agent is not in adjacent frames
-                pass
+        formatted_frame = {"frame": frame_data['frame']}
 
-        if i >= end_frame:
-            break
+        # 速度 (speed)
+        if 'speed' in frame_data:
+            formatted_frame['velocity'] = round(frame_data['speed'], 2)  # m/s
 
-        sample = nusc.get('sample', current_sample_token)
-        current_sample_token = sample['next']
-        if not current_sample_token:
-            break
+        # 加速度 (acceleration magnitude)
+        if 'acceleration' in frame_data and frame_data['acceleration'] is not None:
+            accel_vec = np.array(frame_data['acceleration'])
+            formatted_frame['acceleration'] = round(np.linalg.norm(accel_vec), 2)  # m/s^2
+
+        # 偏航角速度 (yaw rate)
+        if 'angular_velocity_yaw' in frame_data and frame_data['angular_velocity_yaw'] is not None:
+            formatted_frame['yaw_rate'] = round(frame_data['angular_velocity_yaw'], 3)  # rad/s
+
+        # 只有在提取到至少一项运动数据时才添加
+        if len(formatted_frame) > 1:
+            dynamics.append(formatted_frame)
 
     return dynamics
 
@@ -138,7 +133,7 @@ def get_map_context_for_agent(nusc, nusc_map, helper, agent_token, scene_token, 
         return {}  # 如果找不到标注或出错，返回空字典
 
 
-def get_traffic_light_status_for_scene(nusc, nusc_map, sample_token):
+def get_traffic_light_status_for_scene(nusc, sample_token):
     """获取一个sample中所有交通灯的状态"""
     sample = nusc.get('sample', sample_token)
     light_statuses = []
@@ -199,32 +194,30 @@ def analyze_event(event, event_dir):
         manifest = json.load(f)
     images_base64 = []
     visual_evidence_lines = []
-    images_base64_ordered = []
     # 按帧号排序，以保证时序
     sorted_frames = sorted(manifest['frames'].keys())
     prompt_manifest = {"event_id": manifest["event_id"], "frames": {}}
 
     for frame_key in sorted_frames:
-        visual_evidence_lines.append(f"**Frame {int(frame_key.split("_")[1]):03d}:**")
+        frame_idx = int(frame_key.split("_")[1])
+        visual_evidence_lines.append(f"**Frame {frame_idx:03d}:**")
         line_parts = []
         for image_filename in manifest['frames'][frame_key]:
-            image_path = os.path.join(event_dir, image_filename)
-            line_parts.append(f"{image_filename}:<image>")
-            if os.path.exists(image_path):
+            image_path = Path(event_dir) / image_filename
+
+            if image_path.exists():
                 images_base64.append(encode_image_to_base64(image_path))
+                line_parts.append(f"{image_filename}:<image>")
             else:
                 tqdm.write(f"  [Warning] Image {image_filename} not found in {event_dir}. Skipping image.")
-
-
         visual_evidence_lines.append("|".join(line_parts))
         visual_evidence_lines.append("")
 
     visual_evidence_section = "\n".join(visual_evidence_lines)
 
     if not images_base64:
-        tqdm.write(f"  [Warning] No valid images found for event {event_dir.name}. Skipping event.")
+        tqdm.write(f"  [Warning] No valid images found for event {Path(event_dir).name}. Skipping event.")
         return
-
 
     scene_token = event['scene_token']
     scene = nusc.get('scene', scene_token)
@@ -235,34 +228,36 @@ def analyze_event(event, event_dir):
     end_frame = event['event_end_frame']
     peak_frame = event['peak_error_frame']
 
+    event_kinematics = event['dynamics']
+
     context = {}
     key_agent_token = event['key_agent_token']
     context['key_agent'] = {
         'token': key_agent_token,
-        'dynamics': get_agent_dynamics(nusc, helper, key_agent_token, scene_token, start_frame, end_frame),
+        'dynamics': get_agent_dynamics(event_kinematics),
         'map_context_at_peak': get_map_context_for_agent(nusc, nusc_map, helper, key_agent_token, scene_token,
                                                          peak_frame)
     }
 
     context['interacting_agents'] = []
-    for agent_token in event['interacting_agent_tokens']:
+    for agent_token, kinematics_list in event_kinematics['interacting_agents'].items():
         context['interacting_agents'].append({
             'token': agent_token,
-            'dynamics': get_agent_dynamics(nusc, helper, agent_token, scene_token, start_frame, end_frame)
+            'dynamics': get_agent_dynamics(kinematics_list)
         })
 
     try:
         peak_sample_token = get_sample_token_by_frame_index(nusc, scene, peak_frame)
         context['environment_at_peak'] = {
-            'traffic_lights': get_traffic_light_status_for_scene(nusc, nusc_map, peak_sample_token)
+            'traffic_lights': get_traffic_light_status_for_scene(nusc, peak_sample_token)
         }
     except (ValueError, IndexError) as e:
-        tqdm.write(f"[Warning] Could not get peak_sample_token for event {event_dir.name}: {e}")
+        tqdm.write(f"[Warning] Could not get peak_sample_token for event {Path(event_dir).name}: {e}")
         context['environment_at_peak'] = {
             'traffic_lights': 'Error retrieving status'
         }
 
-    scene_context_yaml = yaml.dump(context, indent=2, sort_keys=False  )
+    scene_context_yaml = yaml.dump(context, indent=2, sort_keys=False)
 
     final_prompt = PROMPT_TEMPLATE.format(scene_context_yaml=scene_context_yaml,
     visual_evidence_section=visual_evidence_section)
