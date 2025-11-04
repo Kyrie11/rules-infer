@@ -228,7 +228,7 @@ def analyze_event(event, event_dir):
     end_frame = event['event_end_frame']
     peak_frame = event['peak_error_frame']
 
-    event_kinematics = event['dynamics']
+    event_kinematics = event['kinematics']
 
     context = {}
     key_agent_token = event['key_agent_token']
