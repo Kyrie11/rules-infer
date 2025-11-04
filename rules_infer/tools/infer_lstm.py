@@ -41,6 +41,7 @@ PADDING_FRAMES_AFTER = int(1.0 * FPS)  # 向后延伸 1.0 秒
 # 交互Agent筛选参数
 INTERACTION_RADIUS = 30.0 # 米
 TOP_K_INTERACTING = 2 # 选取交互分数最高的K个agent
+map_cache = {}
 
 
 def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
