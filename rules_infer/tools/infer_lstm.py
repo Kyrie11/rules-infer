@@ -4,7 +4,6 @@ from tqdm import tqdm
 from nuscenes.nuscenes import NuScenes
 from nuscenes.prediction.helper import PredictHelper
 from nuscenes.map_expansion.map_api import NuScenesMap
-from nuscenes.map_expansion.arcline_path_utils import discretize_lanes
 import numpy as np
 from pyquaternion import Quaternion
 from nuscenes.utils.data_classes import Box
