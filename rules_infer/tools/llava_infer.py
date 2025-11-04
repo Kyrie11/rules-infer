@@ -99,10 +99,10 @@ def get_agent_dynamics(kinematics_list):
             # tqdm.write(f"accel_vec:{accel_vec}")
             # tqdm.write(f"lon_acc:{lon_acc}")
             # tqdm.write(f"lat_acc:{lat_acc}")
-            tqdm.write(f"formated_frame:{formatted_frame}")
             # formatted_frame['acceleration'] = round(np.linalg.norm(accel_vec), 2)  # m/s^2
             formatted_frame['lon_acc'] = lon_acc
             formatted_frame['lat_acc'] = lat_acc
+            tqdm.write(f"formated_frame:{formatted_frame}")
 
         # 偏航角速度 (yaw rate)
         if 'angular_velocity_yaw' in frame_data and frame_data['angular_velocity_yaw'] is not None:
