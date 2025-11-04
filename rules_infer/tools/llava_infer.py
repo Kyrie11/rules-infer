@@ -30,6 +30,7 @@ I will provide you with a "Case File" in JSON format that describes the event, a
 - The Case File lists the images available for each frame of the event.
 - The key agent whose trajectory was mispredicted is highlighted in a RED box.
 - Any other relevant interacting agents are in BLUE boxes.
+- The appendix also includes information on the key agent's motion in each frame.  
 
 **Case File & Scene Context:**
 Here is the structured context of the scene, including agent dynamics and environmental data. Use this information as the factual basis for your analysis.
@@ -301,7 +302,7 @@ def analyze_event(event, event_dir):
         analysis_content = json.loads(analysis_content_str)
 
         # 5. 保存分析结果
-        output_path = event_dir / 'vlm_analysis.json'
+        output_path = Path(event_dir) / 'vlm_analysis.json'
         with open(output_path, 'w') as f:
             json.dump(analysis_content, f, indent=4)
             tqdm.write("return corrected result")
