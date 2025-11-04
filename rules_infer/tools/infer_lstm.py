@@ -3,7 +3,6 @@ from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 from nuscenes.nuscenes import NuScenes
 from nuscenes.prediction.helper import PredictHelper
-from nuscenes.map_expansion import get_map
 import numpy as np
 from pyquaternion import Quaternion
 from nuscenes.utils.data_classes import Box
@@ -43,28 +42,6 @@ INTERACTION_RADIUS = 30.0 # 米
 TOP_K_INTERACTING = 2 # 选取交互分数最高的K个agent
 
 
-def get_traffic_lights_in_lane(nusc, map_api, position, config):
-    """
-    获取给定位置附近的交通灯状态。
-    """
-    # 获取交通灯数据
-    traffic_lights_in_scene = map_api.get_traffic_lights()
-    nearby_lights = []
-
-    for traffic_light in traffic_lights_in_scene:
-        # 获取交通灯位置和状态
-        traffic_light_position = np.array(traffic_light['translation'][:2])
-        distance = np.linalg.norm(position - traffic_light_position)
-
-        # 设定一个阈值，只有在阈值内的交通灯才会被考虑
-        if distance < config.INTERACTION_RADIUS:
-            nearby_lights.append({
-                'traffic_light_token': traffic_light['token'],
-                'status': traffic_light['status'],  # 获取交通灯状态
-                'position': traffic_light_position.tolist()
-            })
-
-    return nearby_lights
 
 def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
     """
@@ -72,7 +49,6 @@ def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
     返回一个列表，每个元素是该帧的运动学状态字典。
     """
     kinematics_list = [{} for _ in range(scene['nbr_samples'])]
-    map_api = get_map(nusc, scene)
     # 1. 获取完整的标注历史
     annotations = {}
     sample_token = scene['first_sample_token']
@@ -122,9 +98,7 @@ def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
                 if yaw_diff > np.pi: yaw_diff -= 2 * np.pi
                 if yaw_diff < -np.pi: yaw_diff += 2 * np.pi
                 state['angular_velocity_yaw'] = float(yaw_diff / dt)
-            # 3. 获取交通灯信息
-            nearby_traffic_lights = get_traffic_lights_in_lane(nusc, scene, state['position'], config)
-            state['traffic_lights'] = nearby_traffic_lights
+
         kinematics_list[i] = state
 
     # 3. 第二遍遍历，计算加速度 (需要速度信息)
