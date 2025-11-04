@@ -44,7 +44,7 @@ TOP_K_INTERACTING = 2 # 选取交互分数最高的K个agent
 map_cache = {}
 
 
-def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
+def get_agent_full_kinematics(nusc, helper, scene, instance_token, config, sample_to_tl_anns_map):
     """
     一次性计算一个Agent在整个场景中的完整运动学信息。
     返回一个列表，每个元素是该帧的运动学状态字典。
@@ -62,7 +62,7 @@ def get_agent_full_kinematics(nusc, helper, scene, instance_token, config):
     current_token = scene['first_sample_token']
     frame_idx = 0
     while current_token:
-        tl_ann_tokens = nusc.sample_to_traffic_light_annotation_tokens.get(current_token, [])
+        tl_ann_tokens = sample_to_tl_anns_map.get(current_token, [])
         status_map = {}
         for tl_ann_token in tl_ann_tokens:
             tl_ann = nusc.get('traffic_light_annotation', tl_ann_token)
@@ -311,6 +311,10 @@ def main():
     nusc = NuScenes(version=config.NUSCENES_VERSION, dataroot=config.NUSCENES_DATA_ROOT, verbose=False)
     helper = PredictHelper(nusc)
 
+    sample_to_tl_anns_map = defaultdict(list)
+    for tl_ann in tqdm(nusc.data['traffic_light_annotation'], desc="Indexing TL Anns"):
+        sample_to_tl_anns_map[tl_ann['sample_token']].append(tl_ann['token'])
+
     model = TrajectoryLSTM(config).to(DEVICE)
     model.load_state_dict(torch.load(config.MODEL_SAVE_PATH, map_location=DEVICE))
     model.eval()
@@ -331,7 +335,7 @@ def main():
 
                 if instance_token not in kinematics_cache:
                     kinematics_cache[instance_token] = get_agent_full_kinematics(nusc, helper, scene, instance_token,
-                                                                                 config)
+                                                                                 config, sample_to_tl_anns_map)
 
                 full_track_global, frame_indices = get_full_trajectory(nusc, helper, instance_token, scene)
                 seq_len = config.HIST_LEN + config.PRED_LEN
