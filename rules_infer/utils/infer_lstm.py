@@ -14,7 +14,7 @@ from collections import defaultdict
 
 NUSCENES_PATH = '/data0/senzeyu2/dataset/nuscenes'
 NUSCENES_VERSION = 'v1.0-trainval'
-MODEL_PATH = './lstm_model.pth'
+MODEL_PATH = './trajectory_lstm.pth'
 OUTPUT_JSON_PATH = './social_events.json'
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
