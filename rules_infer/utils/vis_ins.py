@@ -50,9 +50,9 @@ def draw_projected_box(ax, points_2d, color, linewidth, label=None):
         start_point, end_point = points_2d[edge[0]], points_2d[edge[1]]
         ax.plot([start_point[0], end_point[0]], [start_point[1], end_point[1]], color=color, linewidth=linewidth)
 
-    if label is not None:
-        x, y = points_2d[edge[0]]
-        ax.text(x, y, str(label), color=color, fontsize=8, bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
+    # if label is not None:
+    #     x, y = points_2d[edges[0]]
+    #     ax.text(x, y, str(label), color=color, fontsize=8, bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
 
 # --- 辅助函数 (保持不变) ---
 def get_annotation_for_instance(nusc, sample, instance_token):
