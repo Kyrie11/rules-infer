@@ -51,7 +51,7 @@ def draw_projected_box(ax, points_2d, color, linewidth, label=None):
         ax.plot([start_point[0], end_point[0]], [start_point[1], end_point[1]], color=color, linewidth=linewidth)
 
     if label is not None:
-        x, y, z= points_2d[edges[0]]
+        x, y, z= points_2d[0]
         ax.text(x, y, str(label), color=color, fontsize=8, bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
 
 # --- 辅助函数 (保持不变) ---
