@@ -65,12 +65,12 @@ Based on ALL the information provided (both the YAML context and the visual evid
     You MUST provide your response in a single, clean, and parsable JSON object. Do not include any text outside of this JSON block. Use the following structure:
         
     {{
-      "analysis": {{
-        "direct_observation": "...",
-        "causal_inference": "...",
-        "social_inference": "..."
-      }},
-      "implicit_rule_summary": "A concise, one-sentence summary of the discovered implicit social rule or behavior."
+      { "direct_observation": "...", "causal_inference": "...", "social_event": "intersection_yield", 
+      "event_span": {"start":"t-2.0s","end":"t+3.0s"}, "actors": [{"track_id":123, "type":"vehicle", "role":"yielding"}, 
+      {"track_id":45, "type":"pedestrian", "role":"crossing"}], 
+      "context": {"junction":"signalized", "tl_state":"red", "crosswalk":true}, 
+      "evidence": ["pedestrian enters crosswalk", "ego decelerates from 8m/s to 0"], 
+      "confidence": 0.82, "alternatives": ["congestion_stop"], "map_refs": {"lane_ids":[...], "crosswalk_id":...} }
     }}
 
 """

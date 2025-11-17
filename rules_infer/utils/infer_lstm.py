@@ -12,7 +12,7 @@ from rules_infer.utils.analyze_error_distribution import calculate_ice_signal, g
 import json
 from collections import defaultdict
 
-NUSCENES_PATH = '/path/to/your/nuscenes'
+NUSCENES_PATH = '/data0/senzeyu2/dataset/nuscenes'
 NUSCENES_VERSION = 'v1.0-trainval'
 MODEL_PATH = './lstm_model.pth'
 OUTPUT_JSON_PATH = './social_events.json'
