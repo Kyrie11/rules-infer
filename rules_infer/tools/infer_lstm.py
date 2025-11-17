@@ -8,7 +8,7 @@ from pyquaternion import Quaternion
 from nuscenes.utils.data_classes import Box
 from rules_infer.tools.motion_lstm import *
 from rules_infer.tools.config import Config
-from rules_infer.tools.analyze_error_distribution import calculate_ice_signal, get_all_instances_in_scene
+from rules_infer.utils.analyze_error_distribution import calculate_ice_signal, get_all_instances_in_scene
 import json
 from collections import defaultdict
 
@@ -300,7 +300,6 @@ def main():
                         }
                         final_events_by_scene[scene['token']].append(event_data)
 
-    # ... [合并和保存事件的逻辑保持不变] ...
     merged_final_events = []
     for scene_token, events in final_events_by_scene.items():
         events_by_agent = defaultdict(list)

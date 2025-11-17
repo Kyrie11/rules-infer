@@ -36,20 +36,23 @@ def project_box_to_image(box, camera_intrinsic, ego_pose, cam_pose):
     corners_3d = np.dot(cam_rot.inverse.rotation_matrix, corners_3d)
     depth = corners_3d[2, :]
     # ### BUG FIX ###: 使用np.any，只要有一个角点在相机后面，投影就无效
-    if np.any(depth < 0.1):
+    if np.any(depth <= 0.1):
         return None
     points_2d = np.dot(camera_intrinsic, corners_3d)
     points_2d[:2, :] = points_2d[:2, :] / points_2d[2, :]
     return points_2d.T
 
 
-def draw_projected_box(ax, points_2d, color, linewidth):
+def draw_projected_box(ax, points_2d, color, linewidth, label=None):
     # (此函数无需修改)
     edges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]
     for edge in edges:
         start_point, end_point = points_2d[edge[0]], points_2d[edge[1]]
         ax.plot([start_point[0], end_point[0]], [start_point[1], end_point[1]], color=color, linewidth=linewidth)
 
+    if label is not None:
+        x, y = points_2d[0]
+        ax.text(x, y, str(label), color=color, fontsize=8, bbox=dict(facecolor='black', alpha=0.5, edgecolor='none'))
 
 # --- 辅助函数 (保持不变) ---
 def get_annotation_for_instance(nusc, sample, instance_token):
@@ -162,14 +165,14 @@ def visualize_event_with_filtering(nusc, event_data, base_output_dir):
             if primary_ann:
                 box = nusc.get_box(primary_ann['token'])
                 points_2d = project_box_to_image(box, cam_intrinsic, ego_pose, cam_pose)
-                if points_2d is not None: draw_projected_box(ax, points_2d, PRIMARY_AGENT_COLOR, 3)
+                if points_2d is not None: draw_projected_box(ax, points_2d, PRIMARY_AGENT_COLOR, 3, label="KEY")
 
             for token in interacting_agent_tokens:
                 ann = get_annotation_for_instance(nusc, sample, token)
                 if ann:
                     box = nusc.get_box(ann['token'])
                     points_2d = project_box_to_image(box, cam_intrinsic, ego_pose, cam_pose)
-                    if points_2d is not None: draw_projected_box(ax, points_2d, INTERACTING_AGENT_COLOR, 2)
+                    if points_2d is not None: draw_projected_box(ax, points_2d, INTERACTING_AGENT_COLOR, 2, label=token[:4])
 
             ax.set_title(f"{event_id}\n{frame_key} - {cam_type}")
             ax.set_axis_off()
