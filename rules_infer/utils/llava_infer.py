@@ -6,16 +6,19 @@ from tqdm import tqdm
 from pathlib import Path
 import numpy as np
 import yaml
+import traceback
 from nuscenes.nuscenes import NuScenes
 from nuscenes.map_expansion.map_api import NuScenesMap
 from nuscenes.prediction.helper import PredictHelper
+
+from eventbank import run_qc_and_resolve
 
 nusc = NuScenes(version='v1.0-trainval', dataroot='/data0/senzeyu2/dataset/nuscenes', verbose=False)
 helper = PredictHelper(nusc)
 maps_root = "/data0/senzeyu2/dataset/nuscenes"
 
 EVENTS_JSON_PATH = 'social_events.json'
-OUTPUT_DIR = '/data0/senzeyu2/dataset/nuscenes/events_ins'  # 新的输出目录
+OUTPUT_DIR = '/data0/senzeyu2/dataset/nuscenes/events_ins'
 
 EVENTS_BASE_DIR = '/data0/senzeyu2/dataset/nuscenes/events_ins'
 OLLAMA_API_URL = "http://localhost:11434/api/generate"
@@ -23,57 +26,173 @@ MODEL_NAME = "llava"
 # VLM Model ID
 LLAVA_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
 
-PROMPT_TEMPLATE = """
-You are an expert autonomous driving safety analyst and social behavior researcher. Your task is to analyze a sequence of traffic scene images where an AI's trajectory prediction model has failed, and deduce the underlying social reasons for the failure.
+PROMPT_TEMPLATE = r"""
+You are an expert autonomous driving safety analyst and social behavior researcher.
+Your task is to analyze a sequence of traffic scene images where an AI's trajectory prediction model has failed,
+and infer the underlying *social interaction pattern* of the scene.
 
-I will provide you with a "Case File" in JSON format that describes the event, and a series of corresponding images.
-- The Case File lists the images available for each frame of the event.
-- The key agent whose trajectory was mispredicted is highlighted in a RED box.
-- Any other relevant interacting agents are in BLUE boxes.
-- The appendix also includes information on the key agent's motion in each frame.  
+I will provide you with:
+- A **Case File** in YAML/JSON-like format describing:
+  - key agent and interacting agents' kinematics over time,
+  - basic map/traffic-light context at the peak error frame.
+- A **sequence of images** (multiple frames × multiple camera views).
+  - The **key agent** whose trajectory was mispredicted is highlighted in a **RED** box.
+  - Any **interacting agents** are highlighted in **BLUE** boxes. Every BLUE box in the images has a small text ID like "1a2b". This ID exactly matches the short_id field in the Case File for each interacting agent.
+
+You must use BOTH the structured context AND the visual evidence.
+
+---
+## Social Event Taxonomy (Closed Set)
+You MUST treat the following list as the **closed-set label space** for `social_event`:
+
+1. **Right-of-Way Exchange**
+   - `intersection_yield`
+   - `crosswalk_yield`
+   - `roundabout_merge_yield`
+   - `bus_stop_merge_yield`
+   - `U_turn_yield`
+
+2. **Competition / Merge**
+   - `merge_compete`
+   - `zipper_merge`
+
+3. **Relative Trajectory Relations**
+   - `cut_in`
+   - `cut_out`
+   - `follow_gap_opening`
+
+4. **Obstacle & Bypassing**
+   - `double_parking_avoidance`
+   - `blocked_intersection_clear`
+   - `dooring_avoidance`
+
+5. **Pedestrian / Micromobility**
+   - `jaywalking_response`
+   - `bike_lane_merge_yield`
+
+6. **Emergency & Courtesy**
+   - `emergency_vehicle_yield`
+   - `courtesy_stop`
+
+7. **Congestion State**
+   - `congestion_stop`
+   - `queue_discharge`
+
+8. **Compliance / Violation**
+   - `red_light_stop`
+   - `stop_sign_yield`
+   - `priority_violation`
+
+9. **Open Class**
+   - `novel_event` (used only when the above labels do not fit; see instructions below)
+
+You MUST NOT invent new closed-set labels outside the list above.
+If no label in this closed set fits well, you will use the `novel_event` mechanism.
+---
 
 **Case File & Scene Context:**
-Here is the structured context of the scene, including agent dynamics and environmental data. Use this information as the factual basis for your analysis.
+Below is the **structured context** for this event, including agent dynamics and map/traffic-light information:
 
 ```yaml
 {scene_context_yaml}
 
 
-Visual Evidence (Chronological Frames):
-The following section presents a frame-by-frame visual breakdown of the event. Each image token corresponds to a cropped image from a specific camera view at a specific moment in time.
+Below is the visual evidence for the event.
+Images are ordered chronologically by frame index. Each token like image_XXX:<image> corresponds to one image that you can see:
 
 {visual_evidence_section}
 
 
 **Your Goal:**
-Based on ALL the information provided (both the YAML context and the visual evidence), follow a strict Chain of Thought to explain the failure.
-
+You must internally go through the following reasoning steps, but do NOT include these steps explicitly in the final JSON (only include the final summarized fields):
 **Chain of Thought Instructions:**
     
     **Step 1: Direct Observation (Phenomenon)**
-    - **Task:** Based on the sequence of provided images (ordered by frame number), objectively describe what is happening. Focus on the actions of the key agent (RED box) and its interactions with other agents (BLUE boxes) or the environment (e.g., traffic lights, pedestrians, road layout).
+    - **Task:** Describe what is happening in the sequence:
+        (1)motion of the key agent (RED box),
+        (2)interactions with BLUE agents,
+        (3)road geometry, crosswalks, intersections, lane structure,
+        (4)any traffic lights, signs, or blockages that matter.
     
     **Step 2: Causal Inference (Physical Reason)**
-    - **Task:** Based on your observations, infer the immediate, direct, physical-world cause for the key agent's behavior. For example: "The key agent braked suddenly because a pedestrian stepped onto the crosswalk."
+    - **Task:** Infer the immediate physical-world cause of the key agent's behavior and/or the model failure. e.g. "The key agent brakes because another car cuts in front."
     
     **Step 3: Social/Behavioral Inference (Implicit Rule)**
-    - **Task:** Go one level deeper. Analyze the social context. What underlying social norm, local driving culture, or unwritten rule explains why the causal event happened? For example: "The pedestrian crossed against their red light, but the driver chose to yield anyway. This suggests a local driving culture of 'defensive driving' or 'prioritizing pedestrian safety over right-of-way'."
+    - **Task:** Infer the underlying social norm / implicit rule / driving culture: e.g. defensive driving, aggressive merge, courtesy stop, jaywalking tolerance, etc.
     
+    **Step 3: Social Event Classification (Closed Set + Open World)**
+    - **Task:** Using the taxonomy above:
+    (1)First, evaluate ALL closed-set labels and compute a confidence score (0.0–1.0) for each relevant candidate.
+    (2)If at least one closed-set label matches reasonably, choose the best one as social_event_primary.
+    (3)If NO closed-set label fits well (all confidences are low), then:
+        ·Set social_event_primary = "novel_event",
+        ·Fill the novel_event object with:
+            ·is_novel = true
+            ·proposed_label = short free-text name (e.g. "parking_lot_reverse_negotiation")
+            ·nearest_parent = one of the 8 parent groups listed above (e.g. "Right-of-Way Exchange", "Congestion State", etc.)
+            ·rationale = short explanation of why this proposed label and parent were chosen.
     ---
     
     **Output Format:**
-    You MUST provide your response in a single, clean, and parsable JSON object. Do not include any text outside of this JSON block. Use the following structure:
-        
-    {{
-      { "direct_observation": "...", "causal_inference": "...", "social_event": "intersection_yield", 
-      "event_span": {"start":"t-2.0s","end":"t+3.0s"}, "actors": [{"track_id":123, "type":"vehicle", "role":"yielding"}, 
-      {"track_id":45, "type":"pedestrian", "role":"crossing"}], 
-      "context": {"junction":"signalized", "tl_state":"red", "crosswalk":true}, 
-      "evidence": ["pedestrian enters crosswalk", "ego decelerates from 8m/s to 0"], 
-      "confidence": 0.82, "alternatives": ["congestion_stop"], "map_refs": {"lane_ids":[...], "crosswalk_id":...} }
-    }}
-
+    You MUST output one single JSON object and NOTHING else (no markdown, no commentary).
+    
+    Use exactly this schema (keys MUST exist; you may set null or empty lists if unknown):        
+    {
+    "direct_observation": "Natural language description of what happens in the scene.",
+    "causal_inference": "Natural language explanation of the physical cause of the behavior / failure.",
+    "social_event_primary": "ONE label from the closed set above, OR "novel_event"",
+    "closed_set_candidates": [
+    { "label": "intersection_yield", "confidence": 0.78 },
+    { "label": "congestion_stop", "confidence": 0.21 }
+    ],
+    "novel_event": {
+    "is_novel": false,
+    "proposed_label": null,
+    "nearest_parent": null,
+    "rationale": null
+    },
+    "event_span": {
+    "start_frame": 12,
+    "end_frame": 24
+    },
+    "actors": [
+    {
+    "track_id": "key_agent_token_or_short_id",
+    "type": "vehicle / pedestrian / cyclist / bus / emergency_vehicle / other",
+    "role": "yielding / cutting_in / crossing / merging / blocking / leading / following / stopped / other"
+    }
+    ],
+    "context": {
+    "junction_type": "none / unsignalized / signalized / roundabout / merge / unknown",
+    "tl_state": "red / yellow / green / no_light / unknown",
+    "crosswalk_present": true,
+    "traffic_density": "free_flow / moderate / congested / stop_and_go",
+    "notes": "any relevant high-level scene context"
+    },
+    "evidence": [
+    "Short bullet-like phrases that justify your chosen social_event_primary.",
+    "Refer to both frames and agent behaviors when possible."
+    ],
+    "map_refs": {
+    "lane_ids": ["optional_lane_id_1", "optional_lane_id_2"],
+    "crosswalk_ids": ["optional_crosswalk_id"],
+    "other_map_features": []
+    }, 
+    
+    【=="confidence_overall": 0.83,
+    "alternatives": [
+    "zipper_merge",
+    "queue_discharge"
+    ]
+    }
+    
+    Important:
+        (1)All strings must be double-quoted.
+        (2)Booleans must be true or false.
+        (3)Do NOT include comments or trailing commas.
+        (4)Do NOT wrap the JSON in markdown.
 """
+
 def encode_image_to_base64(image_path):
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
@@ -97,18 +216,12 @@ def get_agent_dynamics(kinematics_list):
             accel_vec = np.array(frame_data['acceleration'])
             lon_acc = accel_vec[0]
             lat_acc = accel_vec[1]
-            # tqdm.write(f"accel_vec:{accel_vec}")
-            # tqdm.write(f"lon_acc:{lon_acc}")
-            # tqdm.write(f"lat_acc:{lat_acc}")
-            # formatted_frame['acceleration'] = round(np.linalg.norm(accel_vec), 2)  # m/s^2
             formatted_frame['lon_acc'] = round(float(lon_acc), 2)
             formatted_frame['lat_acc'] = round(float(lat_acc), 2)
-            # tqdm.write(f"formated_frame:{formatted_frame}")
 
         # 偏航角速度 (yaw rate)
         if 'angular_velocity_yaw' in frame_data and frame_data['angular_velocity_yaw'] is not None:
             formatted_frame['yaw_rate'] = round(frame_data['angular_velocity_yaw'], 3)  # rad/s
-
         # 只有在提取到至少一项运动数据时才添加
         if len(formatted_frame) > 1:
             dynamics.append(formatted_frame)
@@ -194,7 +307,7 @@ def build_scene_index(nusc: NuScenes, scene: dict) -> list[str]:
         current_token = sample['next']
     return scene_index
 
-def analyze_event(event, event_dir):
+def analyze_event(event, event_dir, tau=0.6):
     manifest_path = os.path.join(event_dir, 'manifest.json')
     if not os.path.exists(manifest_path):
         tqdm.write(f" [Warning] Manifest not found in {event_dir}. Skipping.")
@@ -295,16 +408,19 @@ def analyze_event(event, event_dir):
         response_data = response.json()
 
         # 'response'字段包含了模型生成的JSON字符串，需要再次解析
-        analysis_content_str = response_data.get('response')
+        analysis_content_str = response_data.get('response', response_data)
         if not analysis_content_str:
             raise ValueError("VLM returned an empty response.")
+        if isinstance(analysis_content_str, str):
+            analysis_content_str = json.loads(analysis_content_str)
 
-        analysis_content = json.loads(analysis_content_str)
+        # ---- EventBank QC & Resolve ----
+        qc_pack = run_qc_and_resolve(analysis_content_str, tau=tau)
 
         # 5. 保存分析结果
         output_path = Path(event_dir) / 'vlm_analysis.json'
         with open(output_path, 'w') as f:
-            json.dump(analysis_content, f, indent=4)
+            json.dump(qc_pack, f, indent=4)
             tqdm.write("return corrected result")
         return True, output_path
 
@@ -333,7 +449,7 @@ if __name__=="__main__":
             tqdm.write(f" not found event {event_id}. Skipping.")
             continue
 
-        if os.path.exists(os.path.join(event_output_dir, 'vlm.json')):
+        if os.path.exists(os.path.join(event_output_dir, 'vlm_analysis.json')):
             tqdm.write(f"Event {event_id} already analyzed. Skipping.")
             continue
 

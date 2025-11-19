@@ -36,7 +36,8 @@ def project_box_to_image(box, camera_intrinsic, ego_pose, cam_pose):
     corners_3d = np.dot(cam_rot.inverse.rotation_matrix, corners_3d)
     depth = corners_3d[2, :]
     # ### BUG FIX ###: 使用np.any，只要有一个角点在相机后面，投影就无效
-    if np.any(depth <= 0.1):
+    # if np.any(depth <= 0.1):
+    if np.all(depth<=0.1):
         return None
     points_2d = np.dot(camera_intrinsic, corners_3d)
     points_2d[:2, :] = points_2d[:2, :] / points_2d[2, :]
@@ -48,7 +49,7 @@ def draw_projected_box(ax, points_2d, color, linewidth, label=None):
     edges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]
     for edge in edges:
         start_point, end_point = points_2d[edge[0]], points_2d[edge[1]]
-        ax.plot([start_point[0], end_point[0]], [start_point[1], end_point[1]], color=color, linewidth=linewidth)
+        ax.plot([start_point[0], end_point[0]],     [start_point[1], end_point[1]], color=color, linewidth=linewidth)
 
     if label is not None:
         x, y, z= points_2d[0]
