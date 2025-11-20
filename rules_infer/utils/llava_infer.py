@@ -332,7 +332,7 @@ def analyze_event(event, event_dir, tau=0.6):
         "images": images_base64,  # 一次性提交所有图片的Base64编码
         "stream": False,
         "format": "json",  # 请求Ollama直接返回JSON格式
-        "options": {"temperature": 0.2}  # 降低温度以获得更稳定的 JSON
+
     }
 
     try:
