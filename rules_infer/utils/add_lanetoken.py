@@ -43,15 +43,18 @@ def enrich_frame_data(frame_list, nusc_map):
         x, y = frame_data['position'][0], frame_data['position'][1]
 
         # 1. 获取最近的车道 (半径设为3米，避免偏差)
-        # returns empty string if not found, so we handle it
+        # get_closest_lane 返回的是 token 字符串或空字符串
         lane_token = nusc_map.get_closest_lane(x, y, radius=3.0)
         frame_data['lane_token'] = lane_token if lane_token else None
 
         # 2. 获取附近的交通灯 (物理设施)
-        # 查找半径15米内的 traffic_light 图层对象
-        # 如果列表非空，说明该位置受信号灯控制（或附近有信号灯）
-        tl_records = nusc_map.get_records_in_radius(x, y, radius=15.0, layers=['traffic_light'])
-        has_tl = len(tl_records.get('traffic_light', [])) > 0
+        # 【修正点】：参数名应为 layer_names
+        tl_records = nusc_map.get_records_in_radius(x, y, radius=15.0, layer_names=['traffic_light'])
+
+        # tl_records 是一个字典，key 是图层名，value 是 token 列表
+        traffic_lights = tl_records.get('traffic_light', [])
+        has_tl = len(traffic_lights) > 0
+
         frame_data['tl_present'] = has_tl
 
         # 注意：我们不添加 tl_state，因为 map 里没有颜色信息，留给 VLM 看图
@@ -101,6 +104,7 @@ def main():
         event['interacting_agents_short_ids'] = {}
 
         if 'kinematics' in event and 'interacting_agents' in event['kinematics']:
+            # interacting_agents 是一个字典：token -> frame_list
             for agent_token, frames in event['kinematics']['interacting_agents'].items():
                 # 添加 short_id 映射
                 s_id = get_short_id(agent_token)
@@ -118,4 +122,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
