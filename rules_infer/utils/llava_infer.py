@@ -83,7 +83,6 @@ Below is the **structured context** for this event, including agent dynamics and
 ```yaml
 {scene_context_yaml}
 
-
 Visual Evidence:
 Images are ordered chronologically.
 {visual_evidence_section}
