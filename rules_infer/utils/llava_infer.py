@@ -318,7 +318,7 @@ def analyze_event(event, event_dir, tau=0.6):
     final_prompt = PROMPT_TEMPLATE.replace("[[SCENE_CONTEXT_YAML]]",scene_context_yaml)
     final_prompt = final_prompt.replace("[[VISUAL_EVIDENCE_SECTION]]", visual_evidence_str)
 
-    tqdm.write(f"the final prompt is {final_prompt}")
+    # tqdm.write(f"the final prompt is {final_prompt}")
 
     if final_prompt.count('<image>') != len(images_base64):
         tqdm.write(f"[ERROR] Mismatch in event {event_dir}: "
