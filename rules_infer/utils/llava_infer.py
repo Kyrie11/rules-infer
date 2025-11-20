@@ -81,12 +81,11 @@ You MUST treat the following list as the **closed-set label space** for `social_
 Below is the **structured context** for this event, including agent dynamics and map/traffic-light information:
 
 ```yaml
-{scene_context_yaml}
+[[SCENE_CONTEXT_YAML]]
 
 Visual Evidence:
 Images are ordered chronologically.
-{visual_evidence_section}
-
+[[VISUAL_EVIDENCE_SECTION]]
 
 **Reasoning Instructions (Chain of Thought):**
 
@@ -149,6 +148,7 @@ Images are ordered chronologically.
     "confidence_overall": 0.83,
     }
 """
+
 
 def encode_image_to_base64(image_path):
     with open(image_path, "rb") as image_file:
@@ -316,8 +316,8 @@ def analyze_event(event, event_dir, tau=0.6):
     scene_context_yaml = yaml.dump(context, indent=2, sort_keys=False)
     visual_evidence_str = "\n".join(visual_evidence_lines)
 
-    final_prompt = PROMPT_TEMPLATE.format(scene_context_yaml=scene_context_yaml,
-    visual_evidence_section=visual_evidence_str)
+    final_prompt = PROMPT_TEMPLATE.replace("[[SCENE_CONTEXT_YAML]]",scene_context_yaml)
+    final_prompt = final_prompt.replace("[[VISUAL_EVIDENCE_SECTION]]", visual_evidence_str)
 
     tqdm.write(f"the final prompt is {final_prompt}")
 
