@@ -104,8 +104,7 @@ Images are ordered chronologically.
             ·rationale = short explanation of why this proposed label and parent were chosen.
          
             
-    **Step 3: Social/Behavioral Inference**
-    - **Task:** Infer the underlying social norm / implicit rule / driving culture: e.g. defensive driving, aggressive merge, courtesy stop, jaywalking tolerance, etc.
+    **3: Social/Behavioral Inference**: Infer the underlying social norm / implicit rule / driving culture: e.g. defensive driving, aggressive merge, courtesy stop, jaywalking tolerance, etc.
     
     ---
     
@@ -360,7 +359,7 @@ def analyze_event(event, event_dir, tau=0.6):
     except requests.exceptions.RequestException as e:
         tqdm.write(f"  [Error] API request failed for {event_dir.name}: {e}")
     except json.JSONDecodeError:
-        tqdm.write(f"  [Error] Failed to parse VLM response for {event_dir.name}. Raw response: {analysis_content_str}")
+        tqdm.write(f"  [Error] Failed to parse VLM response for {event_dir.name}. Raw response: {final_result}")
     except Exception as e:
         tqdm.write(f"  [Error] An unexpected error occurred for {event_dir.name}: {e}\n{traceback.format_exc()}")
 
