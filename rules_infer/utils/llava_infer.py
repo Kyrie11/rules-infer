@@ -345,7 +345,7 @@ def analyze_event(event, event_dir, tau=0.6):
         content = resp_json.get('response', resp_json)
         if isinstance(content, str):
             content = json.loads(content)
-
+        tqdm.write(content)
         # 5. QC & Post-processing
         final_result = run_qc_and_resolve(content, tau=tau)
 
