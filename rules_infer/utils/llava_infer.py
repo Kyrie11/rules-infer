@@ -17,7 +17,7 @@ nusc = NuScenes(version='v1.0-trainval', dataroot='/data0/senzeyu2/dataset/nusce
 helper = PredictHelper(nusc)
 maps_root = "/data0/senzeyu2/dataset/nuscenes"
 
-EVENTS_JSON_PATH = 'social_events.json'
+EVENTS_JSON_PATH = 'social_events_2.json'
 OUTPUT_DIR = '/data0/senzeyu2/dataset/nuscenes/events_ins'
 
 EVENTS_BASE_DIR = '/data0/senzeyu2/dataset/nuscenes/events_ins'
@@ -26,18 +26,29 @@ MODEL_NAME = "llava"
 # VLM Model ID
 LLAVA_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
 
+# ==== 地图缓存 (性能关键) ====
+# 避免在循环中重复加载几百兆的地图文件
+map_cache = {}
+def get_map_cached(location):
+    if location not in map_cache:
+        # tqdm.write(f"Loading map for {location}...")
+        map_cache[location] = NuScenesMap(dataroot=maps_root, map_name=location)
+    return map_cache[location]
+
 PROMPT_TEMPLATE = r"""
 You are an expert autonomous driving safety analyst and social behavior researcher.
 Your task is to analyze a sequence of traffic scene images where an AI's trajectory prediction model has failed,
 and infer the underlying *social interaction pattern* of the scene.
 
 I will provide you with:
-- A **Case File** in YAML/JSON-like format describing:
-  - key agent and interacting agents' kinematics over time,
-  - basic map/traffic-light context at the peak error frame.
+- A **Case File** in YAML format describing:
+  - key agent and interacting agents' kinematics.
+  - **short_id**: A short identifier (e.g., "1a2b") for each agent.
+  - **environment**: Whether a traffic light structure is present at the location.
 - A **sequence of images** (multiple frames × multiple camera views).
-  - The **key agent** whose trajectory was mispredicted is highlighted in a **RED** box.
-  - Any **interacting agents** are highlighted in **BLUE** boxes. Every BLUE box in the images has a small text ID like "1a2b". This ID exactly matches the short_id field in the Case File for each interacting agent.
+  - The **key agent** is in a **RED** box (marked "KEY" or with its ID).
+  - **Interacting agents** are in **BLUE** boxes. 
+  - **IMPORTANT**: The text ID on the BLUE box (e.g., "1a2b") CORRESPONDS EXACTLY to the `short_id` in the Case File. Use this to link the visual agent to its data.
 
 You must use BOTH the structured context AND the visual evidence.
 
@@ -46,48 +57,24 @@ You must use BOTH the structured context AND the visual evidence.
 You MUST treat the following list as the **closed-set label space** for `social_event`:
 
 1. **Right-of-Way Exchange**
-   - `intersection_yield`
-   - `crosswalk_yield`
-   - `roundabout_merge_yield`
-   - `bus_stop_merge_yield`
-   - `U_turn_yield`
-
+   - `intersection_yield`, `crosswalk_yield`, `roundabout_merge_yield`, `bus_stop_merge_yield`, `U_turn_yield`
 2. **Competition / Merge**
-   - `merge_compete`
-   - `zipper_merge`
-
+   - `merge_compete`, `zipper_merge`
 3. **Relative Trajectory Relations**
-   - `cut_in`
-   - `cut_out`
-   - `follow_gap_opening`
-
+   - `cut_in`, `cut_out`, `follow_gap_opening`
 4. **Obstacle & Bypassing**
-   - `double_parking_avoidance`
-   - `blocked_intersection_clear`
-   - `dooring_avoidance`
-
+   - `double_parking_avoidance`, `blocked_intersection_clear`, `dooring_avoidance`
 5. **Pedestrian / Micromobility**
-   - `jaywalking_response`
-   - `bike_lane_merge_yield`
-
+   - `jaywalking_response`, `bike_lane_merge_yield`
 6. **Emergency & Courtesy**
-   - `emergency_vehicle_yield`
-   - `courtesy_stop`
-
+   - `emergency_vehicle_yield`, `courtesy_stop`
 7. **Congestion State**
-   - `congestion_stop`
-   - `queue_discharge`
-
+   - `congestion_stop`, `queue_discharge`
 8. **Compliance / Violation**
-   - `red_light_stop`
-   - `stop_sign_yield`
-   - `priority_violation`
-
+   - `red_light_stop`, `stop_sign_yield`, `priority_violation`
 9. **Open Class**
-   - `novel_event` (used only when the above labels do not fit; see instructions below)
+   - `novel_event` (only if none of the above fit)
 
-You MUST NOT invent new closed-set labels outside the list above.
-If no label in this closed set fits well, you will use the `novel_event` mechanism.
 ---
 
 **Case File & Scene Context:**
@@ -97,31 +84,17 @@ Below is the **structured context** for this event, including agent dynamics and
 {scene_context_yaml}
 
 
-Below is the visual evidence for the event.
-Images are ordered chronologically by frame index. Each token like image_XXX:<image> corresponds to one image that you can see:
-
+Visual Evidence:
+Images are ordered chronologically.
 {visual_evidence_section}
 
 
-**Your Goal:**
-You must internally go through the following reasoning steps, but do NOT include these steps explicitly in the final JSON (only include the final summarized fields):
-**Chain of Thought Instructions:**
+**Reasoning Instructions (Chain of Thought):**
+
+    **1: Describe Direct Observation (Phenomenon)**: Match the BLUE boxes/RED box in images to the short_id/'key' label in the YAML to understand their speed and acceleration,
+    then try to describe exactly what happened， eg. The red vehicle accelerated, changed lanes, and overtook the car in front..
     
-    **Step 1: Direct Observation (Phenomenon)**
-    - **Task:** Describe what is happening in the sequence:
-        (1)motion of the key agent (RED box),
-        (2)interactions with BLUE agents,
-        (3)road geometry, crosswalks, intersections, lane structure,
-        (4)any traffic lights, signs, or blockages that matter.
-    
-    **Step 2: Causal Inference (Physical Reason)**
-    - **Task:** Infer the immediate physical-world cause of the key agent's behavior and/or the model failure. e.g. "The key agent brakes because another car cuts in front."
-    
-    **Step 3: Social/Behavioral Inference (Implicit Rule)**
-    - **Task:** Infer the underlying social norm / implicit rule / driving culture: e.g. defensive driving, aggressive merge, courtesy stop, jaywalking tolerance, etc.
-    
-    **Step 3: Social Event Classification (Closed Set + Open World)**
-    - **Task:** Using the taxonomy above:
+    **2: Identify the social event**: Based on the actual phenomena observed, identify the social event caused by/happened to the key agent 
     (1)First, evaluate ALL closed-set labels and compute a confidence score (0.0–1.0) for each relevant candidate.
     (2)If at least one closed-set label matches reasonably, choose the best one as social_event_primary.
     (3)If NO closed-set label fits well (all confidences are low), then:
@@ -131,12 +104,16 @@ You must internally go through the following reasoning steps, but do NOT include
             ·proposed_label = short free-text name (e.g. "parking_lot_reverse_negotiation")
             ·nearest_parent = one of the 8 parent groups listed above (e.g. "Right-of-Way Exchange", "Congestion State", etc.)
             ·rationale = short explanation of why this proposed label and parent were chosen.
+         
+            
+    **Step 3: Social/Behavioral Inference**
+    - **Task:** Infer the underlying social norm / implicit rule / driving culture: e.g. defensive driving, aggressive merge, courtesy stop, jaywalking tolerance, etc.
+    
     ---
     
     **Output Format:**
-    You MUST output one single JSON object and NOTHING else (no markdown, no commentary).
-    
-    Use exactly this schema (keys MUST exist; you may set null or empty lists if unknown):        
+    You MUST output one single JSON object. No markdown, no text outside JSON.
+           
     {
     "direct_observation": "Natural language description of what happens in the scene.",
     "causal_inference": "Natural language explanation of the physical cause of the behavior / failure.",
@@ -146,15 +123,12 @@ You must internally go through the following reasoning steps, but do NOT include
     { "label": "congestion_stop", "confidence": 0.21 }
     ],
     "novel_event": {
-    "is_novel": false,
+    "is_novel": false/true,
     "proposed_label": null,
     "nearest_parent": null,
     "rationale": null
     },
-    "event_span": {
-    "start_frame": 12,
-    "end_frame": 24
-    },
+    "event_span": {"start_frame": 12,"end_frame": 24},
     "actors": [
     {
     "track_id": "key_agent_token_or_short_id",
@@ -167,30 +141,14 @@ You must internally go through the following reasoning steps, but do NOT include
     "tl_state": "red / yellow / green / no_light / unknown",
     "crosswalk_present": true,
     "traffic_density": "free_flow / moderate / congested / stop_and_go",
-    "notes": "any relevant high-level scene context"
+    "notes": "..."
     },
     "evidence": [
     "Short bullet-like phrases that justify your chosen social_event_primary.",
     "Refer to both frames and agent behaviors when possible."
     ],
-    "map_refs": {
-    "lane_ids": ["optional_lane_id_1", "optional_lane_id_2"],
-    "crosswalk_ids": ["optional_crosswalk_id"],
-    "other_map_features": []
-    }, 
-    
-    【=="confidence_overall": 0.83,
-    "alternatives": [
-    "zipper_merge",
-    "queue_discharge"
-    ]
+    "confidence_overall": 0.83,
     }
-    
-    Important:
-        (1)All strings must be double-quoted.
-        (2)Booleans must be true or false.
-        (3)Do NOT include comments or trailing commas.
-        (4)Do NOT wrap the JSON in markdown.
 """
 
 def encode_image_to_base64(image_path):
@@ -200,7 +158,9 @@ def encode_image_to_base64(image_path):
 
 def get_agent_dynamics(kinematics_list):
     dynamics = []
+
     for frame_data in kinematics_list:
+
         # 只处理包含有效运动学数据的帧
         if not frame_data:
             continue
@@ -219,6 +179,9 @@ def get_agent_dynamics(kinematics_list):
             formatted_frame['lon_acc'] = round(float(lon_acc), 2)
             formatted_frame['lat_acc'] = round(float(lat_acc), 2)
 
+        if frame_data.get('tl_present'):
+            formatted_frame['tl_present'] = True
+
         # 偏航角速度 (yaw rate)
         if 'angular_velocity_yaw' in frame_data and frame_data['angular_velocity_yaw'] is not None:
             formatted_frame['yaw_rate'] = round(frame_data['angular_velocity_yaw'], 3)  # rad/s
@@ -227,32 +190,6 @@ def get_agent_dynamics(kinematics_list):
             dynamics.append(formatted_frame)
 
     return dynamics
-
-
-def get_map_context_for_agent(nusc, nusc_map, helper, agent_token, scene_token, frame):
-    """获取agent在某一帧的地图上下文"""
-    try:
-        scene = nusc.get('scene', scene_token)
-        sample_token = helper.get_sample_token_for_scene(scene_token, frame)
-        ann = helper.get_sample_annotation(agent_token, sample_token)
-
-        pose = ann['translation'][:2]  # x, y
-
-        # 检查是否在可行驶区域/路口
-        is_on_drivable = nusc_map.is_on_layer(pose[0], pose[1], 'drivable_area')
-        is_at_intersection = nusc_map.is_on_layer(pose[0], pose[1], 'intersection')
-
-        # 获取最近的车道信息
-        lane_record = nusc_map.get_closest_lane(pose[0], pose[1], radius=2.0)
-        lane_info = nusc.get('lane', lane_record) if lane_record else {}
-
-        return {
-            "is_on_drivable_surface": is_on_drivable,
-            "is_at_intersection": is_at_intersection,
-            "lane_connectivity": lane_info.get('turn_direction', 'Unknown'),  # e.g., 'straight', 'left', 'right'
-        }
-    except Exception:
-        return {}  # 如果找不到标注或出错，返回空字典
 
 
 def get_traffic_light_status_for_scene(nusc, sample_token):
@@ -335,54 +272,53 @@ def analyze_event(event, event_dir, tau=0.6):
         visual_evidence_lines.append("|".join(line_parts))
         visual_evidence_lines.append("")
 
-    visual_evidence_section = "\n".join(visual_evidence_lines)
 
     if not images_base64:
         tqdm.write(f"  [Warning] No valid images found for event {Path(event_dir).name}. Skipping event.")
         return
 
-    scene_token = event['scene_token']
-    scene = nusc.get('scene', scene_token)
-    log = nusc.get('log', scene['log_token'])
-    nusc_map = NuScenesMap(dataroot=maps_root, map_name=log['location'])
-
-    start_frame = event['event_start_frame']
-    end_frame = event['event_end_frame']
     peak_frame = event['peak_error_frame']
+    # 查找 Key Agent 在 Peak Frame 的状态以确定环境
+    key_agent_kinematics = event['kinematics']['key_agent']
+    peak_state = next((f for f in key_agent_kinematics if f['frame'] == peak_frame), None)
+    tl_at_peak = False
+    if peak_state and peak_state.get('tl_present'):
+        tl_at_peak = True
 
     event_kinematics = event['kinematics']
 
     context = {}
     key_agent_token = event['key_agent_token']
-    context['key_agent'] = {
-        'token': key_agent_token,
-        'dynamics': get_agent_dynamics(event_kinematics['key_agent']),
-        'map_context_at_peak': get_map_context_for_agent(nusc, nusc_map, helper, key_agent_token, scene_token,
-                                                         peak_frame)
+    context = {
+        "event_id": manifest['event_id'],
+        "meta": {
+            "peak_frame": peak_frame,
+            "traffic_light_structure_present": tl_at_peak,
+            "instruction": "Verify TL color visually if structure_present is true."
+        },
+        "key_agent": {
+            "short_id": event.get('key_agent_short_id', "KEY"),
+            "token": event['key_agent_token'],
+            "dynamics_snippet": get_agent_dynamics(key_agent_kinematics)
+        },
+        "interacting_agents": []
     }
 
-    context['interacting_agents'] = []
-    for agent_token, kinematics_list in event_kinematics['interacting_agents'].items():
+    # 填充交互 Agents
+    inter_short_ids = event.get('interacting_agents_short_ids', {})
+    for agent_token, k_list in event['kinematics']['interacting_agents'].items():
+        s_id = inter_short_ids.get(agent_token, agent_token[:4])
         context['interacting_agents'].append({
-            'token': agent_token,
-            'dynamics': get_agent_dynamics(kinematics_list)
+            "short_id": s_id,
+            "dynamics_snippet": get_agent_dynamics(k_list)
         })
 
-    try:
-        peak_sample_token = get_sample_token_by_frame_index(nusc, scene, peak_frame)
-        context['environment_at_peak'] = {
-            'traffic_lights': get_traffic_light_status_for_scene(nusc, peak_sample_token)
-        }
-    except (ValueError, IndexError) as e:
-        tqdm.write(f"[Warning] Could not get peak_sample_token for event {Path(event_dir).name}: {e}")
-        context['environment_at_peak'] = {
-            'traffic_lights': 'Error retrieving status'
-        }
 
     scene_context_yaml = yaml.dump(context, indent=2, sort_keys=False)
+    visual_evidence_str = "\n".join(visual_evidence_lines)
 
     final_prompt = PROMPT_TEMPLATE.format(scene_context_yaml=scene_context_yaml,
-    visual_evidence_section=visual_evidence_section)
+    visual_evidence_section=visual_evidence_str)
 
     tqdm.write(f"the final prompt is {final_prompt}")
 
@@ -397,7 +333,8 @@ def analyze_event(event, event_dir, tau=0.6):
         "prompt": final_prompt,
         "images": images_base64,  # 一次性提交所有图片的Base64编码
         "stream": False,
-        "format": "json"  # 请求Ollama直接返回JSON格式
+        "format": "json",  # 请求Ollama直接返回JSON格式
+        "options": {"temperature": 0.2}  # 降低温度以获得更稳定的 JSON
     }
 
     try:
@@ -405,23 +342,20 @@ def analyze_event(event, event_dir, tau=0.6):
         response = requests.post(OLLAMA_API_URL, json=payload, timeout=600)
         response.raise_for_status()
 
-        response_data = response.json()
+        # 解析响应
+        resp_json = response.json()
+        content = resp_json.get('response', resp_json)
+        if isinstance(content, str):
+            content = json.loads(content)
 
-        # 'response'字段包含了模型生成的JSON字符串，需要再次解析
-        analysis_content_str = response_data.get('response', response_data)
-        if not analysis_content_str:
-            raise ValueError("VLM returned an empty response.")
-        if isinstance(analysis_content_str, str):
-            analysis_content_str = json.loads(analysis_content_str)
+        # 5. QC & Post-processing
+        final_result = run_qc_and_resolve(content, tau=tau)
 
-        # ---- EventBank QC & Resolve ----
-        qc_pack = run_qc_and_resolve(analysis_content_str, tau=tau)
-
-        # 5. 保存分析结果
+        # Save
         output_path = Path(event_dir) / 'vlm_analysis.json'
         with open(output_path, 'w') as f:
-            json.dump(qc_pack, f, indent=4)
-            tqdm.write("return corrected result")
+            json.dump(final_result, f, indent=4)
+
         return True, output_path
 
     except requests.exceptions.RequestException as e:
