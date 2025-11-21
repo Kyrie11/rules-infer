@@ -232,6 +232,60 @@ def get_sample_token_by_frame_index(nusc: NuScenes, scene: dict, frame_index: in
 
     return sample_token
 
+
+def sample_important_frames(manifest_frames, event_start, event_end, peak_frame, max_frames=5):
+    """
+    从 manifest 中智能采样帧，确保包含 start, end 和 peak，且总数不超过 max_frames。
+    """
+    # 1. 获取所有可用的帧号 (int)
+    available_indices = []
+    frame_key_map = {}  # int -> key string (e.g. 10 -> "frame_010")
+
+    for key in manifest_frames.keys():
+        idx = int(key.split('_')[1])
+        available_indices.append(idx)
+        frame_key_map[idx] = key
+
+    available_indices.sort()
+    if not available_indices:
+        return []
+
+    # 2. 确定关键时刻
+    # 有些 manifest 可能不完全覆盖 event_start/end，取交集
+    valid_start = min(available_indices, key=lambda x: abs(x - event_start))
+    valid_end = min(available_indices, key=lambda x: abs(x - event_end))
+    valid_peak = min(available_indices, key=lambda x: abs(x - peak_frame))
+
+    critical_frames = {valid_start, valid_end, valid_peak}
+
+    # 3. 补全剩余名额 (均匀采样)
+    needed = max_frames - len(critical_frames)
+    if needed > 0:
+        # 在 start 和 end 之间均匀采样
+        step = (valid_end - valid_start) / (needed + 1)
+        for i in range(1, needed + 1):
+            target = valid_start + i * step
+            # 找到最近的帧
+            nearest = min(available_indices, key=lambda x: abs(x - target))
+            critical_frames.add(nearest)
+
+    # 4. 排序并返回对应的 Key
+    final_indices = sorted(list(critical_frames))
+
+    # 再次截断以防万一 (如果 critical_frames 本身就超过 max_frames，虽然上面逻辑不会)
+    if len(final_indices) > max_frames:
+        # 强制保留 peak, start, end
+        base = {valid_start, valid_end, valid_peak}
+        # 填充剩下的
+        for f in final_indices:
+            if len(base) >= max_frames:
+                break
+            base.add(f)
+        final_indices = sorted(list(base))
+
+    return [frame_key_map[idx] for idx in final_indices]
+
+
 def build_scene_index(nusc: NuScenes, scene: dict) -> list[str]:
     """Builds a list of sample_tokens for a scene, indexed by frame number."""
     scene_index = []
@@ -251,12 +305,21 @@ def analyze_event(event, event_dir, tau=0.6):
         manifest = json.load(f)
     images_base64 = []
     visual_evidence_lines = []
+
+    start_f = event['event_start_frame']
+    end_f = event['event_end_frame']
+    peak_f = event['peak_error_frame']
+    # 只选取最重要的 5-6 帧 (根据你的显存情况调整 max_frames)
+    # 每帧大概 3 张图，5帧 = 15张图 ≈ 8600 tokens，这对 7B 模型是可以接受的
+    selected_frame_keys = sample_important_frames(manifest['frames'], start_f, end_f, peak_f, max_frames=5)
+
     # 按帧号排序，以保证时序
     sorted_frames = sorted(manifest['frames'].keys())
-    prompt_manifest = {"event_id": manifest["event_id"], "frames": {}}
 
-    for frame_key in sorted_frames:
+    for frame_key in selected_frame_keys:
         frame_idx = int(frame_key.split("_")[1])
+        # 标记 Peak Frame，给 VLM 提示
+        prefix = "**(CRITICAL MOMENT) " if frame_idx == peak_f else ""
         visual_evidence_lines.append(f"**Frame {frame_idx:03d}:**")
         line_parts = []
         for image_filename in manifest['frames'][frame_key]:
@@ -283,10 +346,6 @@ def analyze_event(event, event_dir, tau=0.6):
     if peak_state and peak_state.get('tl_present'):
         tl_at_peak = True
 
-    event_kinematics = event['kinematics']
-
-    context = {}
-    key_agent_token = event['key_agent_token']
     context = {
         "event_id": manifest['event_id'],
         "meta": {
@@ -332,7 +391,11 @@ def analyze_event(event, event_dir, tau=0.6):
         "images": images_base64,  # 一次性提交所有图片的Base64编码
         "stream": False,
         "format": "json",  # 请求Ollama直接返回JSON格式
-
+        "options": {
+            "temperature": 0.2,
+            "num_ctx": 4096  # 【关键】显式扩大上下文窗口 (默认可能是 2048)
+            # 如果你的显存够大 (>=24GB)，可以尝试设为 8192
+        }
     }
 
     try:
