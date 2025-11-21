@@ -393,7 +393,7 @@ def analyze_event(event, event_dir, tau=0.6):
         "format": "json",  # 请求Ollama直接返回JSON格式
         "options": {
             "temperature": 0.2,
-            "num_ctx": 4096  # 【关键】显式扩大上下文窗口 (默认可能是 2048)
+            "num_ctx": 2048  # 【关键】显式扩大上下文窗口 (默认可能是 2048)
             # 如果你的显存够大 (>=24GB)，可以尝试设为 8192
         }
     }

@@ -1,5 +1,5 @@
 # batch_types.py
-from typing import Optional, Dict, List, TypedDict
+from typing import Optional, Dict, TypedDict, Tuple
 import torch
 from dataclasses import dataclass
 import torch.nn as nn
@@ -395,9 +395,13 @@ class ContextWeaver(nn.Module):
         # 编码器
         self.agent_enc = AgentEncoder(fa, d, cfg.nhead, cfg.agent_encoder_layers, cfg.ff_ratio, cfg.dropout)
 
+        if cfg.use_bev:
+            self.bev_enc = BEVEncoder(in_ch=3, d_model=d)
         # LearnedTopoEncoder 负责 H_L / H_Z（从 BEV 学会划分）
-        self.topo = topo if topo is not None else TopoEncoder(d_model=d, n_queries_lane=64,
-                                                                     n_queries_zone=32, token_dim=d)
+        n_q_lane = getattr(cfg, "n_queries_lane", 64)
+        n_q_zone = getattr(cfg, "n_queries_zone", 32)
+        self.topo = TopoEncoder(d_model=d, n_queries_lane=n_q_lane,
+                                n_queries_zone=n_q_zone, token_dim=d)
 
         # Cross blocks
         self.axl = nn.ModuleList([CrossBlock(d, cfg.nhead, cfg.ff_ratio, cfg.dropout)
@@ -406,6 +410,95 @@ class ContextWeaver(nn.Module):
                                   for _ in range(cfg.cross_layers)])
 
         self.use_map_indices = use_map_indices
+
+    def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        B = batch['agent_hist'].shape[0]
+        gamma, beta = self.cond(batch['tod_id'], batch['weather_id'], batch['region_id'], batch['tl_state_id'])
+        # ===== BEV 分支 =====
+        if not self.cfg.use_bev or batch.get('bev', None) is None:
+            raise ValueError("LearnedTopoEncoder 需要 BEV 图像输入。请设置 cfg.use_bev=True 并在 batch 中提供 'bev'。")
+
+        # 1) Agent 的时序编码（保持你现有逻辑：从 BEV tokens/或其它来源抽取到 agent 时序特征）
+        bev_tokens = self.bev_enc(batch['bev'])  # [B, Np, d] 作为 agent 编码输入的来源（与你现有实现一致）
+        H_A = self.agent_enc(bev_tokens, batch['agent_mask'], gamma, beta, self.cond_ln)  # [B, Na, T, d]
+        # 2) Lane / Zone 的学习划分与向量化 token（使用 LearnedTopoEncoder）
+        topo_out = self.topo_enc(batch['bev'])
+        H_L = topo_out["H_L"]  # [B, Ql, d]
+        H_Z = topo_out["H_Z"]  # [B, Qz, d]
+        lane_mask_logits = topo_out["lane_mask"]  # [B, Ql, H', W']
+        zone_mask_logits = topo_out["zone_mask"]  # [B, Qz, H', W']
+        lane_attr_logits = topo_out["lane_attr_logits"]  # [B, Ql, Cl]
+        zone_type_logits = topo_out["zone_type_logits"]  # [B, Qz, Cz]
+        lane_geom = topo_out["lane_geom"]  # [B, Ql, Gl]
+        zone_geom = topo_out["zone_geom"]  # [B, Qz, Gz]
+
+        # ===== 邻域 gather：对每个 agent 取 K_l 条近邻车道，K_z 个近邻 Zone =====
+        Na = H_A.shape[1]
+        H_Ln, lk_mask = gather_index_2d_safe(H_L, batch['a2l_idx'])  # ([B*Na,K_l,d], [B*Na,K_l])
+        H_Zn, zk_mask = gather_index_2d_safe(H_Z, batch['a2z_idx'])  # ([B*Na,K_z,d], [B*Na,K_z])
+
+        # 将 Agent 时间序列 [B,Na,T,d] -> [B*Na,T,d]
+        Q = H_A.reshape(B * Na, H_A.shape[2], H_A.shape[3])
+
+        # Cross A-L
+        attn_logs = {}
+        for i, blk in enumerate(self.axl):
+            Q, attn = blk(Q, H_Ln, H_Ln, key_padding_mask=(lk_mask == 0))
+            attn_logs[f'axl_attn_{i}'] = attn  # [B*Na, T, K_l]
+
+        # Cross A-Z
+        for i, blk in enumerate(self.axz):
+            Q, attn = blk(Q, H_Zn, H_Zn, key_padding_mask=(zk_mask == 0))
+            attn_logs[f'axz_attn_{i}'] = attn  # [B*Na, T, K_z]
+
+        # 回写：更新后的 agent 表征
+        H_A_fused = Q.view(B, Na, -1, self.cfg.d_model)  # [B,Na,T,d]
+
+        # 组织输出：保留用于可视化/调试的 topo 辅助结果（掩码/几何/类型）
+        topo_aux = {
+            'lane_mask_logits': lane_mask_logits,
+            'zone_mask_logits': zone_mask_logits,
+            'lane_attr_logits': lane_attr_logits,
+            'zone_type_logits': zone_type_logits,
+            'lane_geom': lane_geom,
+            'zone_geom': zone_geom
+        }
+
+        return {
+            'H_A': H_A_fused,  # [B,Na,T,d]
+            'H_L': H_L,  # [B,Ql,d]（LearnedTopoEncoder 产出）
+            'H_Z': H_Z,  # [B,Qz,d]
+            'context_gb': (gamma, beta),
+            'attn_logs': attn_logs,
+            'bev_tokens': bev_tokens,
+            'topo_aux': topo_aux  # 用于可视化 attention/掩码/几何
+        }
+
+    def gather_index_2d_safe(tokens: torch.Tensor, idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        更稳健的 gather：同时检查上下界，避免预测实例数(Ql/Qz)与索引不一致时越界。
+        tokens: [B, N, d]
+        idx:    [B, M, K]  (例如 B×Na×K_l 的 lane/zone 索引；-1 表示 padding)
+        返回:
+          gathered:   [B*M, K, d]
+          valid_mask: [B*M, K]  （True=有效）
+        """
+        B, N, d = tokens.shape
+        BM, K = idx.shape[0] * idx.shape[1], idx.shape[2]
+        flat_idx = idx.view(B * idx.shape[1], K)
+
+        # 有效性：[-1 为无效] 以及 [小于 N]
+        valid = (flat_idx >= 0) & (flat_idx < N)
+        clamped = flat_idx.clamp(min=0, max=max(N - 1, 0))
+
+        # 扩展批维
+        b_ids = torch.arange(B, device=tokens.device).view(B, 1, 1).expand_as(idx[:, :, :1]).reshape(B * idx.shape[1],
+                                                                                                     1)
+        b_ids = b_ids.expand(BM, K)
+
+        gathered = tokens[b_ids, clamped, :]  # [B*M, K, d]
+        gathered = gathered * valid.unsqueeze(-1).float()
+        return gathered, valid
 
 def gather_index_2d(tokens: torch.Tensor, idx: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
